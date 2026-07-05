@@ -19,7 +19,7 @@ namespace OnSiteProcurementMod
 {
 	public class OnSiteProcurement : MonoBehaviour, IHasModSaveData
 	{
-		const string LessonName = "OSP Field Lesson";
+		const string LessonNamePrefix = "Learn Spell - ";
 		const string TempSpellTag = "OSP";
 		const string StartingSpellTag = "OSP_START";
 		const string EnteringText = "Entering Dungeon - Depositing Items/Spells";
@@ -31,6 +31,7 @@ namespace OnSiteProcurementMod
 		static Mod mod;
 		static OnSiteProcurement instance;
 		static readonly MethodInfo StartEquippedItemMethod = typeof(ItemEquipTable).GetMethod("StartEquippedItem", BindingFlags.Instance | BindingFlags.NonPublic);
+		static readonly BindingFlags ItemCollectionFieldFlags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 		static readonly MensClothing[] BasicMensTops = {
 			MensClothing.Short_shirt,
 			MensClothing.Short_shirt_with_belt,
@@ -139,6 +140,17 @@ namespace OnSiteProcurementMod
 			LootTables.OnLootSpawned -= OnLootSpawned;
 			StartGameBehaviour.OnNewGame -= OnNewGame;
 			SaveLoadManager.OnLoad -= OnLoad;
+		}
+
+		void Update()
+		{
+			if (data == null || !data.Active)
+				return;
+
+			GameManager gameManager = GameManager.Instance;
+			PlayerEnterExit playerEnterExit = gameManager != null ? gameManager.PlayerEnterExit : null;
+			if (playerEnterExit != null && !playerEnterExit.IsPlayerInsideDungeon)
+				FinishRun();
 		}
 
 		public object NewSaveData()
@@ -441,10 +453,12 @@ namespace OnSiteProcurementMod
 			EffectBundleSettings[] learnedSpellbook = keepLearnedSpellsOnExit ? player.SerializeSpellbook() : null;
 			DaggerfallUI.AddHUDText(ExitingText);
 			RemoveIssuedItems(player);
+			RemoveIssuedItemsFromLooseCollections(player);
 			RemoveLessons(player.Items);
 			RemoveLessons(player.WagonItems);
 			RemoveLessons(player.OtherItems);
 			RemoveLessonsFromWorld();
+			RemoveLessonsFromLooseCollections();
 			RestoreStashedItems(player);
 			player.DeserializeSpellbook(data.OriginalSpellbook);
 			if (keepLearnedSpellsOnExit)
@@ -558,6 +572,30 @@ namespace OnSiteProcurementMod
 			}
 		}
 
+		void RemoveIssuedItemsFromLooseCollections(PlayerEntity player)
+		{
+			if (data.IssuedItemUids == null || data.IssuedItemUids.Length == 0)
+				return;
+
+			MonoBehaviour[] behaviours = FindObjectsOfType<MonoBehaviour>();
+			for (int i = 0; i < behaviours.Length; i++)
+			{
+				if (behaviours[i] == null)
+					continue;
+
+				FieldInfo[] fields = behaviours[i].GetType().GetFields(ItemCollectionFieldFlags);
+				for (int j = 0; j < fields.Length; j++)
+				{
+					ItemCollection collection = fields[j].GetValue(behaviours[i]) as ItemCollection;
+					if (collection == null)
+						continue;
+
+					for (int k = 0; k < data.IssuedItemUids.Length; k++)
+						RemoveItem(collection, data.IssuedItemUids[k], player);
+				}
+			}
+		}
+
 		void RemoveItem(ItemCollection collection, ulong uid, PlayerEntity player)
 		{
 			if (collection == null)
@@ -590,6 +628,20 @@ namespace OnSiteProcurementMod
 			DaggerfallLoot[] loots = FindObjectsOfType<DaggerfallLoot>();
 			for (int i = 0; i < loots.Length; i++)
 				RemoveLessons(loots[i].Items);
+		}
+
+		void RemoveLessonsFromLooseCollections()
+		{
+			MonoBehaviour[] behaviours = FindObjectsOfType<MonoBehaviour>();
+			for (int i = 0; i < behaviours.Length; i++)
+			{
+				if (behaviours[i] == null)
+					continue;
+
+				FieldInfo[] fields = behaviours[i].GetType().GetFields(ItemCollectionFieldFlags);
+				for (int j = 0; j < fields.Length; j++)
+					RemoveLessons(fields[j].GetValue(behaviours[i]) as ItemCollection);
+			}
 		}
 
 		bool UseLesson(DaggerfallUnityItem item, ItemCollection collection)
@@ -641,10 +693,19 @@ namespace OnSiteProcurementMod
 		DaggerfallUnityItem CreateLesson()
 		{
 			DaggerfallUnityItem lesson = ItemBuilder.CreateItem(ItemGroups.UselessItems2, (int)UselessItems2.Parchment);
-			lesson.shortName = LessonName;
-			lesson.message = LessonMarker;
 			lesson.value = RandomLeveledSpellIndex();
+			lesson.shortName = LessonNamePrefix + SpellName(lesson.value);
+			lesson.message = LessonMarker;
 			return lesson;
+		}
+
+		string SpellName(int spellIndex)
+		{
+			SpellRecord.SpellRecordData spell;
+			if (GameManager.Instance.EntityEffectBroker.GetClassicSpellRecord(spellIndex, out spell) && !string.IsNullOrEmpty(spell.spellName))
+				return spell.spellName;
+
+			return "Unknown Spell";
 		}
 
 		int RandomSpellIndex()
