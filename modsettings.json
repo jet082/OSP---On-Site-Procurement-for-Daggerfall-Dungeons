@@ -1,0 +1,33 @@
+{
+	"Version": "1.0.0",
+	"Sections": [
+		{
+			"Name": "General",
+			"Description": "On-Site Procurement settings",
+			"IsAdvanced": false,
+			"Keys": [
+				{
+					"Value": true,
+					"Name": "Enabled",
+					"Description": "Enable OSP dungeon entry procurement",
+					"$version": "v1",
+					"$type": "DaggerfallWorkshop.Game.Utility.ModSupport.ModSettings.ToggleKey"
+				},
+				{
+					"Value": true,
+					"Name": "ApplyInStartingDungeon",
+					"Description": "Apply OSP to the new-game starting dungeon",
+					"$version": "v1",
+					"$type": "DaggerfallWorkshop.Game.Utility.ModSupport.ModSettings.ToggleKey"
+				},
+				{
+					"Value": true,
+					"Name": "GrantTemporarySpellbookOnEntry",
+					"Description": "If disabled, a guaranteed spellbook is somewhere in the dungeon",
+					"$version": "v1",
+					"$type": "DaggerfallWorkshop.Game.Utility.ModSupport.ModSettings.ToggleKey"
+				}
+			]
+		}
+	]
+}

@@ -1,0 +1,15 @@
+{
+    "ModTitle": "OSP - On-Site Procurement",
+    "ModVersion": "1.0.0",
+    "ModAuthor": "jet082",
+    "ContactInfo": "",
+    "DFUnity_Version": "1.1.1",
+    "ModDescription": "OSP - On-Site-Procurement rules for all dungeons",
+    "GUID": "b9d70a73-61c2-4c18-95e6-21e73cb75d69",
+    "Files": [
+        "Assets/Game/Mods/osp-on-site-procurement/osp-on-site-procurement.dfmod.json",
+        "Assets/Game/Mods/osp-on-site-procurement/modsettings.json",
+        "Assets/Game/Mods/osp-on-site-procurement/Scripts/OnSiteProcurement.cs"
+    ],
+    "Dependencies": []
+}
