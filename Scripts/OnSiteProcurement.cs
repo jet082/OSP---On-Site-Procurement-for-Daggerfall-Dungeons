@@ -13,6 +13,7 @@ using DaggerfallWorkshop.Game.Serialization;
 using DaggerfallWorkshop.Game.Utility;
 using DaggerfallWorkshop.Game.Utility.ModSupport;
 using DaggerfallWorkshop.Game.Utility.ModSupport.ModSettings;
+using DaggerfallWorkshop.Utility;
 using UnityEngine;
 
 namespace OnSiteProcurementMod
@@ -27,11 +28,36 @@ namespace OnSiteProcurementMod
 		const int LessonMarker = 0x05F05F;
 		const int LessonMinLevel = 1;
 		const int LessonMaxLevel = 31;
+		const int InitialLootPlacementDelayFrames = 8;
+		const double ExtraSpellbookChance = 0.08;
 
 		static Mod mod;
 		static OnSiteProcurement instance;
 		static readonly MethodInfo StartEquippedItemMethod = typeof(ItemEquipTable).GetMethod("StartEquippedItem", BindingFlags.Instance | BindingFlags.NonPublic);
 		static readonly BindingFlags ItemCollectionFieldFlags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+		static readonly DFCareer.Skills[] MartialSkills = {
+			DFCareer.Skills.ShortBlade,
+			DFCareer.Skills.LongBlade,
+			DFCareer.Skills.HandToHand,
+			DFCareer.Skills.Axe,
+			DFCareer.Skills.BluntWeapon,
+			DFCareer.Skills.Archery
+		};
+		static readonly DFCareer.Skills[] WeaponPathSkills = {
+			DFCareer.Skills.ShortBlade,
+			DFCareer.Skills.LongBlade,
+			DFCareer.Skills.Axe,
+			DFCareer.Skills.BluntWeapon,
+			DFCareer.Skills.Archery
+		};
+		static readonly DFCareer.Skills[] MagicSkills = {
+			DFCareer.Skills.Alteration,
+			DFCareer.Skills.Restoration,
+			DFCareer.Skills.Destruction,
+			DFCareer.Skills.Mysticism,
+			DFCareer.Skills.Thaumaturgy,
+			DFCareer.Skills.Illusion
+		};
 		static readonly MensClothing[] BasicMensTops = {
 			MensClothing.Short_shirt,
 			MensClothing.Short_shirt_with_belt,
@@ -70,15 +96,17 @@ namespace OnSiteProcurementMod
 		};
 		OSPData data = new OSPData();
 		bool entryPending;
-		bool waitingForDungeonLoot;
+		bool initialLootPlacementPending;
+		int initialLootPlacementFrames;
 		bool ospEnabled = true;
 		bool applyInStartingDungeon = true;
 		bool grantTemporarySpellbookOnEntry;
 		bool keepLearnedSpellsOnExit;
 		bool pureChaosMode;
 		bool trueOSPMode;
+		bool guaranteedPathToKillAllEnemies = true;
 		bool startingDungeonEntryPending;
-		int lootSeedCounter;
+		System.Random lessonRandom = new System.Random();
 
 		public Type SaveDataType { get { return typeof(OSPData); } }
 
@@ -105,9 +133,12 @@ namespace OnSiteProcurementMod
 		void LoadSettings(ModSettings settings, ModSettingsChange change)
 		{
 			bool wasEnabled = ospEnabled;
+			bool wasGuaranteedPath = guaranteedPathToKillAllEnemies;
 			ApplySettings(settings);
 			if (wasEnabled && !ospEnabled && data != null && data.Active)
 				FinishRun();
+			if (!wasGuaranteedPath && guaranteedPathToKillAllEnemies && data != null && data.Active && !data.KillPathWeaponSatisfied)
+				QueueInitialLootPlacement();
 		}
 
 		void ApplySettings(ModSettings settings)
@@ -118,6 +149,7 @@ namespace OnSiteProcurementMod
 			keepLearnedSpellsOnExit = settings.GetBool("General", "KeepLearnedSpellsOnExit");
 			pureChaosMode = settings.GetBool("General", "PureChaosMode");
 			trueOSPMode = settings.GetBool("General", "TrueOSPMode");
+			guaranteedPathToKillAllEnemies = settings.GetBool("General", "GuaranteedPathToKillAllEnemies");
 		}
 
 		void OnEnable()
@@ -126,7 +158,7 @@ namespace OnSiteProcurementMod
 			PlayerEnterExit.OnFailedTransition += OnFailedTransition;
 			PlayerEnterExit.OnTransitionDungeonInterior += OnTransitionDungeonInterior;
 			PlayerEnterExit.OnTransitionDungeonExterior += OnTransitionDungeonExterior;
-			LootTables.OnLootSpawned += OnLootSpawned;
+			EnemyDeath.OnEnemyDeath += OnEnemyDeath;
 			StartGameBehaviour.OnNewGame += OnNewGame;
 			SaveLoadManager.OnLoad += OnLoad;
 		}
@@ -137,7 +169,7 @@ namespace OnSiteProcurementMod
 			PlayerEnterExit.OnFailedTransition -= OnFailedTransition;
 			PlayerEnterExit.OnTransitionDungeonInterior -= OnTransitionDungeonInterior;
 			PlayerEnterExit.OnTransitionDungeonExterior -= OnTransitionDungeonExterior;
-			LootTables.OnLootSpawned -= OnLootSpawned;
+			EnemyDeath.OnEnemyDeath -= OnEnemyDeath;
 			StartGameBehaviour.OnNewGame -= OnNewGame;
 			SaveLoadManager.OnLoad -= OnLoad;
 		}
@@ -150,7 +182,12 @@ namespace OnSiteProcurementMod
 			GameManager gameManager = GameManager.Instance;
 			PlayerEnterExit playerEnterExit = gameManager != null ? gameManager.PlayerEnterExit : null;
 			if (playerEnterExit != null && !playerEnterExit.IsPlayerInsideDungeon)
+			{
 				FinishRun();
+				return;
+			}
+
+			UpdateInitialLootPlacement();
 		}
 
 		public object NewSaveData()
@@ -169,9 +206,9 @@ namespace OnSiteProcurementMod
 			if (data == null)
 				data = new OSPData();
 			entryPending = false;
-			waitingForDungeonLoot = false;
+			initialLootPlacementPending = data.Active;
+			initialLootPlacementFrames = InitialLootPlacementDelayFrames;
 			startingDungeonEntryPending = false;
-			lootSeedCounter = 0;
 		}
 
 		void OnNewGame()
@@ -211,8 +248,7 @@ namespace OnSiteProcurementMod
 			}
 
 			entryPending = true;
-			waitingForDungeonLoot = true;
-			lootSeedCounter = 0;
+			initialLootPlacementPending = false;
 			data = new OSPData();
 			data.RandomSeed = BuildDungeonSeed(args != null ? args.DaggerfallDungeon : null);
 			BeginStash();
@@ -226,8 +262,8 @@ namespace OnSiteProcurementMod
 			RestoreStashedItems(GameManager.Instance.PlayerEntity);
 			data = new OSPData();
 			entryPending = false;
-			waitingForDungeonLoot = false;
-			lootSeedCounter = 0;
+			initialLootPlacementPending = false;
+			initialLootPlacementFrames = 0;
 		}
 
 		void OnTransitionDungeonInterior(PlayerEnterExit.TransitionEventArgs args)
@@ -245,19 +281,15 @@ namespace OnSiteProcurementMod
 
 			if (!trueOSPMode)
 			{
-				SeedRandomForOSP(0x1000);
-				GrantFieldKit(player);
-				GrantStartingSpell(player);
+				RunWithOSPSeed(0x1000, delegate
+				{
+					GrantFieldKit(player);
+					GrantStartingSpell(player);
+				});
 			}
 
-			if (!data.SpellbookInjected || !data.LessonInjected)
-			{
-				SeedRandomForOSP(0x2000);
-				InjectDungeonFallbackLoot();
-			}
-
+			QueueInitialLootPlacement();
 			entryPending = false;
-			waitingForDungeonLoot = false;
 		}
 
 		void OnTransitionDungeonExterior(PlayerEnterExit.TransitionEventArgs args)
@@ -268,21 +300,18 @@ namespace OnSiteProcurementMod
 			FinishRun();
 		}
 
-		void OnLootSpawned(object sender, TabledLootSpawnedEventArgs args)
+		void OnEnemyDeath(object sender, EventArgs e)
 		{
-			if (!waitingForDungeonLoot || args == null || args.Items == null)
+			if (data == null || !data.Active)
 				return;
 
-			int salt = 0x3000 + lootSeedCounter++;
-			SeedRandomForOSP(salt);
-			if ((!grantTemporarySpellbookOnEntry || trueOSPMode) && !data.SpellbookInjected)
-			{
-				args.Items.AddItem(ItemBuilder.CreateItem(ItemGroups.MiscItems, (int)MiscItems.Spellbook));
-				data.SpellbookInjected = true;
-			}
+			EnemyDeath enemyDeath = sender as EnemyDeath;
+			if (enemyDeath == null)
+				return;
 
-			args.Items.AddItem(CreateLesson());
-			data.LessonInjected = true;
+			DaggerfallEntityBehaviour entityBehaviour = enemyDeath.GetComponent<DaggerfallEntityBehaviour>();
+			if (entityBehaviour != null)
+				TryPopulateLootContainer(entityBehaviour.CorpseLootContainer);
 		}
 
 		void BeginStash()
@@ -335,10 +364,10 @@ namespace OnSiteProcurementMod
 				data.SpellbookInjected = spellbook != null;
 			}
 
-			switch (HighestMartialSkill(player))
+			switch (RunMartialSkill(player))
 			{
 				case DFCareer.Skills.HandToHand:
-					AddIssued(player, ItemBuilder.CreateRandomPotion(), issued);
+					AddIssued(player, CreateRandomLowestValuePotion(), issued);
 					break;
 				case DFCareer.Skills.LongBlade:
 					AddAndEquipIssued(player, ItemBuilder.CreateWeapon(Weapons.Broadsword, WeaponMaterialTypes.Iron), issued);
@@ -359,6 +388,48 @@ namespace OnSiteProcurementMod
 			}
 
 			data.IssuedItemUids = issued.ToArray();
+		}
+
+		DaggerfallUnityItem CreateRandomLowestValuePotion()
+		{
+			List<int> recipeKeys = GameManager.Instance.EntityEffectBroker.GetPotionRecipeKeys();
+			List<int> cheapest = new List<int>();
+			int bestPrice = int.MaxValue;
+			for (int i = 0; i < recipeKeys.Count; i++)
+			{
+				PotionRecipe recipe = GameManager.Instance.EntityEffectBroker.GetPotionRecipe(recipeKeys[i]);
+				if (recipe == null)
+					continue;
+
+				if (recipe.Price < bestPrice)
+				{
+					cheapest.Clear();
+					bestPrice = recipe.Price;
+				}
+				if (recipe.Price == bestPrice)
+					cheapest.Add(recipeKeys[i]);
+			}
+
+			if (cheapest.Count == 0)
+				return ItemBuilder.CreateRandomPotion();
+
+			return ItemBuilder.CreatePotion(cheapest[UnityEngine.Random.Range(0, cheapest.Count)]);
+		}
+
+		DFCareer.Skills RunMartialSkill(PlayerEntity player)
+		{
+			if (data != null && data.SelectedMartialSkill >= 0)
+				return (DFCareer.Skills)data.SelectedMartialSkill;
+
+			DFCareer.Skills skill = DFCareer.Skills.ShortBlade;
+			RunWithOSPSeed(0x3000, delegate
+			{
+				skill = HighestMartialSkill(player);
+			});
+			if (data != null)
+				data.SelectedMartialSkill = (int)skill;
+
+			return skill;
 		}
 
 		void GrantStartingSpell(PlayerEntity player)
@@ -389,29 +460,20 @@ namespace OnSiteProcurementMod
 
 		DFCareer.Skills HighestMartialSkill(PlayerEntity player)
 		{
-			DFCareer.Skills[] skills = {
-				DFCareer.Skills.ShortBlade,
-				DFCareer.Skills.LongBlade,
-				DFCareer.Skills.HandToHand,
-				DFCareer.Skills.Axe,
-				DFCareer.Skills.BluntWeapon,
-				DFCareer.Skills.Archery
-			};
-
 			List<DFCareer.Skills> best = new List<DFCareer.Skills>();
 			int bestValue = -1;
-			for (int i = 0; i < skills.Length; i++)
+			for (int i = 0; i < MartialSkills.Length; i++)
 			{
-				int value = player.Skills.GetLiveSkillValue(skills[i]);
+				int value = player.Skills.GetLiveSkillValue(MartialSkills[i]);
 				if (value > bestValue)
 				{
 					best.Clear();
-					best.Add(skills[i]);
+					best.Add(MartialSkills[i]);
 					bestValue = value;
 				}
 				else if (value == bestValue)
 				{
-					best.Add(skills[i]);
+					best.Add(MartialSkills[i]);
 				}
 			}
 
@@ -422,12 +484,8 @@ namespace OnSiteProcurementMod
 		{
 			List<DFCareer.Skills> best = new List<DFCareer.Skills>();
 			int bestValue = -1;
-			ConsiderMagicSkill(player, DFCareer.Skills.Alteration, best, ref bestValue);
-			ConsiderMagicSkill(player, DFCareer.Skills.Restoration, best, ref bestValue);
-			ConsiderMagicSkill(player, DFCareer.Skills.Destruction, best, ref bestValue);
-			ConsiderMagicSkill(player, DFCareer.Skills.Mysticism, best, ref bestValue);
-			ConsiderMagicSkill(player, DFCareer.Skills.Thaumaturgy, best, ref bestValue);
-			ConsiderMagicSkill(player, DFCareer.Skills.Illusion, best, ref bestValue);
+			for (int i = 0; i < MagicSkills.Length; i++)
+				ConsiderMagicSkill(player, MagicSkills[i], best, ref bestValue);
 
 			return best[UnityEngine.Random.Range(0, best.Count)];
 		}
@@ -449,6 +507,8 @@ namespace OnSiteProcurementMod
 
 		void FinishRun()
 		{
+			initialLootPlacementPending = false;
+			initialLootPlacementFrames = 0;
 			PlayerEntity player = GameManager.Instance.PlayerEntity;
 			EffectBundleSettings[] learnedSpellbook = keepLearnedSpellsOnExit ? player.SerializeSpellbook() : null;
 			DaggerfallUI.AddHUDText(ExitingText);
@@ -659,7 +719,7 @@ namespace OnSiteProcurementMod
 
 			if (AddTemporarySpell(item.value))
 			{
-				DaggerfallUI.AddHUDText("You memorize a temporary spell.");
+				DaggerfallUI.AddHUDText(keepLearnedSpellsOnExit ? "You memorize a spell." : "You memorize a temporary spell.");
 				if (collection != null)
 					collection.RemoveItem(item);
 			}
@@ -706,6 +766,27 @@ namespace OnSiteProcurementMod
 				return spell.spellName;
 
 			return "Unknown Spell";
+		}
+
+		bool ShouldDropLesson()
+		{
+			PlayerEntity player = GameManager.Instance.PlayerEntity;
+			float magicRatio = SkillRatio(player, MagicSkills);
+			float martialRatio = SkillRatio(player, MartialSkills);
+			float chance = Mathf.Clamp(0.10f + magicRatio * 0.70f + Mathf.Max(0f, magicRatio - martialRatio) * 0.20f, 0.05f, 0.95f);
+			return lessonRandom.NextDouble() < chance;
+		}
+
+		float SkillRatio(PlayerEntity player, DFCareer.Skills[] skills)
+		{
+			if (player == null || skills == null || skills.Length == 0)
+				return 0f;
+
+			int sum = 0;
+			for (int i = 0; i < skills.Length; i++)
+				sum += Clamp(player.Skills.GetLiveSkillValue(skills[i]), 0, 100);
+
+			return sum / (float)(skills.Length * 100);
 		}
 
 		int RandomSpellIndex()
@@ -791,7 +872,7 @@ namespace OnSiteProcurementMod
 			}
 
 			if (spells.Count > 0)
-				return spells[UnityEngine.Random.Range(0, spells.Count)].index;
+				return spells[LessonRandomRange(spells.Count)].index;
 
 			return ClosestSpellIndexToCost(targetCost);
 		}
@@ -821,7 +902,7 @@ namespace OnSiteProcurementMod
 			if (spells.Count == 0)
 				return RandomSpellIndex();
 
-			return spells[UnityEngine.Random.Range(0, spells.Count)].index;
+			return spells[LessonRandomRange(spells.Count)].index;
 		}
 
 		int Clamp(int value, int min, int max)
@@ -918,12 +999,31 @@ namespace OnSiteProcurementMod
 			}
 		}
 
-		void SeedRandomForOSP(int salt)
+		int LessonRandomRange(int max)
 		{
-			if (pureChaosMode)
-				return;
+			return max > 0 ? lessonRandom.Next(max) : 0;
+		}
 
+		void RunWithOSPSeed(int salt, Action action)
+		{
+			if (action == null)
+				return;
+			if (pureChaosMode)
+			{
+				action();
+				return;
+			}
+
+			UnityEngine.Random.State state = UnityEngine.Random.state;
 			UnityEngine.Random.InitState(CombineSeed(CurrentDungeonSeed(), salt));
+			try
+			{
+				action();
+			}
+			finally
+			{
+				UnityEngine.Random.state = state;
+			}
 		}
 
 		int CurrentDungeonSeed()
@@ -1021,19 +1121,388 @@ namespace OnSiteProcurementMod
 			return item != null && item.IsParchment && item.message == LessonMarker;
 		}
 
-		void InjectDungeonFallbackLoot()
+		bool IsSpellbook(DaggerfallUnityItem item)
 		{
-			DaggerfallLoot loot = CreateFallbackLootContainer();
-			if (!data.SpellbookInjected)
+			return item != null && item.IsOfTemplate(ItemGroups.MiscItems, (int)MiscItems.Spellbook);
+		}
+
+		bool SpellbookInWorldLootPool()
+		{
+			return !grantTemporarySpellbookOnEntry || trueOSPMode;
+		}
+
+		bool NeedsWorldSpellbook()
+		{
+			return SpellbookInWorldLootPool() && !data.SpellbookInjected;
+		}
+
+		void QueueInitialLootPlacement()
+		{
+			initialLootPlacementPending = true;
+			initialLootPlacementFrames = InitialLootPlacementDelayFrames;
+		}
+
+		void UpdateInitialLootPlacement()
+		{
+			if (!initialLootPlacementPending)
+				return;
+			if (initialLootPlacementFrames > 0)
 			{
-				loot.Items.AddItem(ItemBuilder.CreateItem(ItemGroups.MiscItems, (int)MiscItems.Spellbook));
-				data.SpellbookInjected = true;
+				initialLootPlacementFrames--;
+				return;
 			}
+
+			initialLootPlacementPending = false;
+			if (!NeedsWorldSpellbook() && data.LessonInjected && !NeedsKillPathCheck())
+				return;
+
+			PlaceInitialLoot();
+		}
+
+		void PlaceInitialLoot()
+		{
+			List<DaggerfallLoot> loots = GetEligibleLootContainers();
+			if (loots.Count == 0)
+				loots.Add(CreateFallbackLootContainer());
+
+			EnsureKillPathWeapon(loots);
+
+			if (NeedsWorldSpellbook())
+				AddSpellbookToLoot(PickLoot(loots), true);
+
 			if (!data.LessonInjected)
+				AddLessonToLoot(PickLoot(loots), true);
+
+			for (int i = 0; i < loots.Count; i++)
+				TryPopulateLootContainer(loots[i]);
+		}
+
+		List<DaggerfallLoot> GetEligibleLootContainers()
+		{
+			List<DaggerfallLoot> loots = new List<DaggerfallLoot>();
+			foreach (DaggerfallLoot loot in ActiveGameObjectDatabase.GetActiveLoot())
 			{
-				loot.Items.AddItem(CreateLesson());
-				data.LessonInjected = true;
+				if (IsEligibleOSPLoot(loot))
+					loots.Add(loot);
 			}
+
+			return loots;
+		}
+
+		bool IsEligibleOSPLoot(DaggerfallLoot loot)
+		{
+			if (loot == null || loot.Items == null || !loot.gameObject.activeInHierarchy)
+				return false;
+
+			return loot.ContainerType == LootContainerTypes.RandomTreasure ||
+				loot.ContainerType == LootContainerTypes.CorpseMarker ||
+				loot.ContainerType == LootContainerTypes.DroppedLoot;
+		}
+
+		DaggerfallLoot PickLoot(List<DaggerfallLoot> loots)
+		{
+			return loots != null && loots.Count > 0 ? loots[lessonRandom.Next(loots.Count)] : null;
+		}
+
+		void TryPopulateLootContainer(DaggerfallLoot loot)
+		{
+			if (!IsEligibleOSPLoot(loot) || WasLootChecked(loot.LoadID))
+				return;
+
+			MarkLootChecked(loot.LoadID);
+
+			if (NeedsWorldSpellbook())
+				AddSpellbookToLoot(loot, true);
+			else if (SpellbookInWorldLootPool() && !ContainsSpellbook(loot.Items) && lessonRandom.NextDouble() < ExtraSpellbookChance)
+				AddSpellbookToLoot(loot, false);
+
+			if (!data.LessonInjected)
+				AddLessonToLoot(loot, true);
+			else if (!ContainsLesson(loot.Items) && ShouldDropLesson())
+				AddLessonToLoot(loot, true);
+		}
+
+		bool NeedsKillPathCheck()
+		{
+			return guaranteedPathToKillAllEnemies && data != null && !data.KillPathWeaponSatisfied;
+		}
+
+		void EnsureKillPathWeapon(List<DaggerfallLoot> loots)
+		{
+			if (!NeedsKillPathCheck())
+				return;
+
+			WeaponMaterialTypes required = RequiredDungeonMaterial();
+			if (required <= WeaponMaterialTypes.Iron)
+			{
+				data.KillPathWeaponSatisfied = true;
+				return;
+			}
+
+			WeaponMaterialTypes material = MinimumMaterialNeededForKillPath(required, loots);
+			if (material <= WeaponMaterialTypes.Iron)
+			{
+				data.KillPathWeaponSatisfied = true;
+				return;
+			}
+
+			DaggerfallLoot loot = PickLoot(loots);
+			if (loot == null)
+				loot = CreateFallbackLootContainer();
+
+			AddKillPathWeaponToLoot(loot, RandomWeaponPathSkill(), material);
+			data.KillPathWeaponSatisfied = true;
+		}
+
+		DFCareer.Skills RandomWeaponPathSkill()
+		{
+			return WeaponPathSkills[lessonRandom.Next(WeaponPathSkills.Length)];
+		}
+
+		WeaponMaterialTypes RequiredDungeonMaterial()
+		{
+			WeaponMaterialTypes required = WeaponMaterialTypes.Iron;
+			foreach (DaggerfallEntityBehaviour entityBehaviour in ActiveGameObjectDatabase.GetActiveEnemyBehaviours())
+			{
+				EnemyEntity enemy;
+				if (TryGetRelevantEnemy(entityBehaviour, out enemy) && enemy.MobileEnemy.MinMetalToHit > required)
+					required = enemy.MobileEnemy.MinMetalToHit;
+			}
+
+			foreach (FoeSpawner spawner in ActiveGameObjectDatabase.GetActiveFoeSpawners())
+			{
+				if (spawner == null || spawner.AlliedToPlayer || spawner.SpawnCount <= 0 || spawner.FoeType == MobileTypes.None)
+					continue;
+
+				MobileEnemy enemy;
+				if (EnemyBasics.GetEnemy(spawner.FoeType, out enemy) && enemy.MinMetalToHit > required)
+					required = enemy.MinMetalToHit;
+			}
+
+			return required;
+		}
+
+		WeaponMaterialTypes MinimumMaterialNeededForKillPath(WeaponMaterialTypes required, List<DaggerfallLoot> loots)
+		{
+			if (MaterialPathProvides(required, loots, WeaponMaterialTypes.None))
+				return WeaponMaterialTypes.None;
+
+			for (int material = (int)WeaponMaterialTypes.Steel; material <= (int)required; material++)
+			{
+				WeaponMaterialTypes candidate = (WeaponMaterialTypes)material;
+				if (MaterialPathProvides(required, loots, candidate))
+					return candidate;
+			}
+
+			return required;
+		}
+
+		bool MaterialPathProvides(WeaponMaterialTypes required, List<DaggerfallLoot> loots, WeaponMaterialTypes bonusMaterial)
+		{
+			WeaponMaterialTypes accessible = WeaponMaterialTypes.Iron;
+			accessible = MaxMaterial(accessible, bonusMaterial);
+			PlayerEntity player = GameManager.Instance.PlayerEntity;
+			if (player != null)
+				accessible = MaxMaterial(accessible, MaxWeaponMaterialInCollection(player.Items));
+
+			bool changed = true;
+			while (changed)
+			{
+				changed = false;
+				WeaponMaterialTypes next = accessible;
+
+				if (loots != null)
+				{
+					for (int i = 0; i < loots.Count; i++)
+					{
+						if (loots[i] != null)
+							next = MaxMaterial(next, MaxWeaponMaterialInCollection(loots[i].Items));
+					}
+				}
+
+				foreach (DaggerfallEntityBehaviour entityBehaviour in ActiveGameObjectDatabase.GetActiveEnemyBehaviours())
+				{
+					EnemyEntity enemy;
+					if (TryGetRelevantEnemy(entityBehaviour, out enemy) && enemy.MobileEnemy.MinMetalToHit <= accessible)
+						next = MaxMaterial(next, MaxWeaponMaterialInCollection(enemy.Items));
+				}
+
+				if (next > accessible)
+				{
+					accessible = next;
+					changed = true;
+				}
+			}
+
+			return accessible >= required;
+		}
+
+		bool TryGetRelevantEnemy(DaggerfallEntityBehaviour entityBehaviour, out EnemyEntity enemy)
+		{
+			enemy = null;
+			if (entityBehaviour == null ||
+				(entityBehaviour.EntityType != EntityTypes.EnemyMonster && entityBehaviour.EntityType != EntityTypes.EnemyClass))
+				return false;
+
+			enemy = entityBehaviour.Entity as EnemyEntity;
+			return enemy != null && enemy.MobileEnemy.Team != MobileTeams.PlayerAlly;
+		}
+
+		WeaponMaterialTypes MaxWeaponMaterialInCollection(ItemCollection collection)
+		{
+			WeaponMaterialTypes max = WeaponMaterialTypes.None;
+			if (collection == null)
+				return max;
+
+			for (int i = 0; i < collection.Count; i++)
+			{
+				DaggerfallUnityItem item = collection.GetItem(i);
+				if (IsMaterialPathWeapon(item))
+					max = MaxMaterial(max, WeaponMaterial(item));
+			}
+
+			return max;
+		}
+
+		bool IsMaterialPathWeapon(DaggerfallUnityItem item)
+		{
+			if (item == null || item.ItemGroup != ItemGroups.Weapons || item.IsOfTemplate(ItemGroups.Weapons, (int)Weapons.Arrow))
+				return false;
+
+			DFCareer.Skills skill = item.GetWeaponSkillID();
+			return skill != DFCareer.Skills.None && skill != DFCareer.Skills.Archery;
+		}
+
+		WeaponMaterialTypes WeaponMaterial(DaggerfallUnityItem item)
+		{
+			if (item == null || item.NativeMaterialValue < (int)WeaponMaterialTypes.Iron)
+				return WeaponMaterialTypes.None;
+
+			if (item.NativeMaterialValue > (int)WeaponMaterialTypes.Daedric)
+				return WeaponMaterialTypes.Daedric;
+
+			return (WeaponMaterialTypes)item.NativeMaterialValue;
+		}
+
+		WeaponMaterialTypes MaxMaterial(WeaponMaterialTypes a, WeaponMaterialTypes b)
+		{
+			return a > b ? a : b;
+		}
+
+		void AddKillPathWeaponToLoot(DaggerfallLoot loot, DFCareer.Skills skill, WeaponMaterialTypes material)
+		{
+			if (loot == null || loot.Items == null)
+				return;
+
+			loot.Items.AddItem(CreateMinimumWeaponForSkill(skill, material));
+			if (skill == DFCareer.Skills.Archery)
+			{
+				DaggerfallUnityItem arrows = ItemBuilder.CreateWeapon(Weapons.Arrow, WeaponMaterialTypes.None);
+				arrows.stackCount = 20;
+				loot.Items.AddItem(arrows);
+			}
+		}
+
+		DaggerfallUnityItem CreateMinimumWeaponForSkill(DFCareer.Skills skill, WeaponMaterialTypes material)
+		{
+			switch (skill)
+			{
+				case DFCareer.Skills.LongBlade:
+					return ItemBuilder.CreateWeapon(Weapons.Broadsword, material);
+				case DFCareer.Skills.Axe:
+					return ItemBuilder.CreateWeapon(Weapons.Battle_Axe, material);
+				case DFCareer.Skills.BluntWeapon:
+					return ItemBuilder.CreateWeapon(Weapons.Mace, material);
+				case DFCareer.Skills.Archery:
+					return ItemBuilder.CreateWeapon(Weapons.Short_Bow, material);
+				default:
+					return ItemBuilder.CreateWeapon(Weapons.Dagger, material);
+			}
+		}
+
+		void AddSpellbookToLoot(DaggerfallLoot loot, bool marksRequiredSpellbook)
+		{
+			if (loot == null || loot.Items == null)
+				return;
+			if (marksRequiredSpellbook && ContainsSpellbook(loot.Items))
+			{
+				data.SpellbookInjected = true;
+				return;
+			}
+
+			loot.Items.AddItem(ItemBuilder.CreateItem(ItemGroups.MiscItems, (int)MiscItems.Spellbook));
+			if (marksRequiredSpellbook)
+				data.SpellbookInjected = true;
+		}
+
+		void AddLessonToLoot(DaggerfallLoot loot, bool marksRequiredLesson)
+		{
+			if (loot == null || loot.Items == null)
+				return;
+			if (marksRequiredLesson && ContainsLesson(loot.Items))
+			{
+				data.LessonInjected = true;
+				return;
+			}
+
+			loot.Items.AddItem(CreateLesson());
+			if (marksRequiredLesson)
+				data.LessonInjected = true;
+		}
+
+		bool ContainsSpellbook(ItemCollection collection)
+		{
+			if (collection == null)
+				return false;
+
+			for (int i = 0; i < collection.Count; i++)
+			{
+				if (IsSpellbook(collection.GetItem(i)))
+					return true;
+			}
+
+			return false;
+		}
+
+		bool ContainsLesson(ItemCollection collection)
+		{
+			if (collection == null)
+				return false;
+
+			for (int i = 0; i < collection.Count; i++)
+			{
+				if (IsLesson(collection.GetItem(i)))
+					return true;
+			}
+
+			return false;
+		}
+
+		bool WasLootChecked(ulong loadId)
+		{
+			if (loadId == 0 || data == null || data.CheckedLootUids == null)
+				return false;
+
+			for (int i = 0; i < data.CheckedLootUids.Length; i++)
+			{
+				if (data.CheckedLootUids[i] == loadId)
+					return true;
+			}
+
+			return false;
+		}
+
+		void MarkLootChecked(ulong loadId)
+		{
+			if (loadId == 0 || data == null || WasLootChecked(loadId))
+				return;
+
+			if (data.CheckedLootUids == null)
+				data.CheckedLootUids = new ulong[0];
+
+			int index = data.CheckedLootUids.Length;
+			Array.Resize(ref data.CheckedLootUids, index + 1);
+			data.CheckedLootUids[index] = loadId;
 		}
 
 		DaggerfallLoot CreateFallbackLootContainer()
@@ -1087,11 +1556,14 @@ namespace OnSiteProcurementMod
 			public bool Active;
 			public bool SpellbookInjected;
 			public bool LessonInjected;
+			public bool KillPathWeaponSatisfied;
 			public int RandomSeed;
+			public int SelectedMartialSkill = -1;
 			public int StashedGold;
 			public ulong OriginalLightSourceUid;
 			public ulong[] IssuedItemUids = new ulong[0];
 			public ulong[] StashedItemUids = new ulong[0];
+			public ulong[] CheckedLootUids = new ulong[0];
 			public ulong[] OriginalEquipTable = new ulong[0];
 			public EffectBundleSettings[] OriginalSpellbook = new EffectBundleSettings[0];
 		}

@@ -47,6 +47,13 @@
 					"Description": "Start each dungeon with literally nothing",
 					"$version": "v1",
 					"$type": "DaggerfallWorkshop.Game.Utility.ModSupport.ModSettings.ToggleKey"
+				},
+				{
+					"Value": true,
+					"Name": "GuaranteedPathToKillAllEnemies",
+					"Description": "Ensure a weapon path exists to kill all enemies with melee weapons",
+					"$version": "v1",
+					"$type": "DaggerfallWorkshop.Game.Utility.ModSupport.ModSettings.ToggleKey"
 				}
 			]
 		}
