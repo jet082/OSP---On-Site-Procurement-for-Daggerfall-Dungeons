@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using DaggerfallConnect;
 using DaggerfallConnect.Save;
+using DaggerfallConnect.Utility;
 using DaggerfallWorkshop;
 using DaggerfallWorkshop.Game;
 using DaggerfallWorkshop.Game.Entity;
@@ -20,9 +21,12 @@ namespace OnSiteProcurementMod
 	{
 		const string LessonName = "OSP Field Lesson";
 		const string TempSpellTag = "OSP";
+		const string StartingSpellTag = "OSP_START";
 		const string EnteringText = "Entering Dungeon - Depositing Items/Spells";
 		const string ExitingText = "Exiting Dungeon - Restoring Items/Spells";
 		const int LessonMarker = 0x05F05F;
+		const int LessonMinLevel = 1;
+		const int LessonMaxLevel = 31;
 
 		static Mod mod;
 		static OnSiteProcurement instance;
@@ -63,14 +67,17 @@ namespace OnSiteProcurementMod
 			WomensClothing.Long_skirt,
 			WomensClothing.Tights
 		};
-
 		OSPData data = new OSPData();
 		bool entryPending;
 		bool waitingForDungeonLoot;
 		bool ospEnabled = true;
 		bool applyInStartingDungeon = true;
 		bool grantTemporarySpellbookOnEntry;
+		bool keepLearnedSpellsOnExit;
+		bool pureChaosMode;
+		bool trueOSPMode;
 		bool startingDungeonEntryPending;
+		int lootSeedCounter;
 
 		public Type SaveDataType { get { return typeof(OSPData); } }
 
@@ -107,6 +114,9 @@ namespace OnSiteProcurementMod
 			ospEnabled = settings.GetBool("General", "Enabled");
 			applyInStartingDungeon = settings.GetBool("General", "ApplyInStartingDungeon");
 			grantTemporarySpellbookOnEntry = settings.GetBool("General", "GrantTemporarySpellbookOnEntry");
+			keepLearnedSpellsOnExit = settings.GetBool("General", "KeepLearnedSpellsOnExit");
+			pureChaosMode = settings.GetBool("General", "PureChaosMode");
+			trueOSPMode = settings.GetBool("General", "TrueOSPMode");
 		}
 
 		void OnEnable()
@@ -149,6 +159,7 @@ namespace OnSiteProcurementMod
 			entryPending = false;
 			waitingForDungeonLoot = false;
 			startingDungeonEntryPending = false;
+			lootSeedCounter = 0;
 		}
 
 		void OnNewGame()
@@ -189,7 +200,9 @@ namespace OnSiteProcurementMod
 
 			entryPending = true;
 			waitingForDungeonLoot = true;
+			lootSeedCounter = 0;
 			data = new OSPData();
+			data.RandomSeed = BuildDungeonSeed(args != null ? args.DaggerfallDungeon : null);
 			BeginStash();
 		}
 
@@ -202,6 +215,7 @@ namespace OnSiteProcurementMod
 			data = new OSPData();
 			entryPending = false;
 			waitingForDungeonLoot = false;
+			lootSeedCounter = 0;
 		}
 
 		void OnTransitionDungeonInterior(PlayerEnterExit.TransitionEventArgs args)
@@ -211,14 +225,24 @@ namespace OnSiteProcurementMod
 
 			PlayerEntity player = GameManager.Instance.PlayerEntity;
 			data.Active = true;
+			if (args != null && args.DaggerfallDungeon != null)
+				data.RandomSeed = BuildDungeonSeed(args.DaggerfallDungeon);
 			data.OriginalSpellbook = player.SerializeSpellbook();
 			player.DeserializeSpellbook(null);
 			DaggerfallUI.AddHUDText(EnteringText);
 
-			GrantFieldKit(player);
+			if (!trueOSPMode)
+			{
+				SeedRandomForOSP(0x1000);
+				GrantFieldKit(player);
+				GrantStartingSpell(player);
+			}
 
-			if (!data.SpellbookInjected)
+			if (!data.SpellbookInjected || !data.LessonInjected)
+			{
+				SeedRandomForOSP(0x2000);
 				InjectDungeonFallbackLoot();
+			}
 
 			entryPending = false;
 			waitingForDungeonLoot = false;
@@ -237,13 +261,16 @@ namespace OnSiteProcurementMod
 			if (!waitingForDungeonLoot || args == null || args.Items == null)
 				return;
 
-			if (!grantTemporarySpellbookOnEntry && !data.SpellbookInjected)
+			int salt = 0x3000 + lootSeedCounter++;
+			SeedRandomForOSP(salt);
+			if ((!grantTemporarySpellbookOnEntry || trueOSPMode) && !data.SpellbookInjected)
 			{
 				args.Items.AddItem(ItemBuilder.CreateItem(ItemGroups.MiscItems, (int)MiscItems.Spellbook));
 				data.SpellbookInjected = true;
 			}
 
 			args.Items.AddItem(CreateLesson());
+			data.LessonInjected = true;
 		}
 
 		void BeginStash()
@@ -322,6 +349,11 @@ namespace OnSiteProcurementMod
 			data.IssuedItemUids = issued.ToArray();
 		}
 
+		void GrantStartingSpell(PlayerEntity player)
+		{
+			AddTemporarySpell(LowestSpellIndexForSkill(HighestMagicSkill(player)), StartingSpellTag);
+		}
+
 		void AddIssued(PlayerEntity player, DaggerfallUnityItem item, List<ulong> issued)
 		{
 			if (item == null)
@@ -374,17 +406,94 @@ namespace OnSiteProcurementMod
 			return best[UnityEngine.Random.Range(0, best.Count)];
 		}
 
+		DFCareer.Skills HighestMagicSkill(PlayerEntity player)
+		{
+			List<DFCareer.Skills> best = new List<DFCareer.Skills>();
+			int bestValue = -1;
+			ConsiderMagicSkill(player, DFCareer.Skills.Alteration, best, ref bestValue);
+			ConsiderMagicSkill(player, DFCareer.Skills.Restoration, best, ref bestValue);
+			ConsiderMagicSkill(player, DFCareer.Skills.Destruction, best, ref bestValue);
+			ConsiderMagicSkill(player, DFCareer.Skills.Mysticism, best, ref bestValue);
+			ConsiderMagicSkill(player, DFCareer.Skills.Thaumaturgy, best, ref bestValue);
+			ConsiderMagicSkill(player, DFCareer.Skills.Illusion, best, ref bestValue);
+
+			return best[UnityEngine.Random.Range(0, best.Count)];
+		}
+
+		void ConsiderMagicSkill(PlayerEntity player, DFCareer.Skills skill, List<DFCareer.Skills> best, ref int bestValue)
+		{
+			int value = player.Skills.GetLiveSkillValue(skill);
+			if (value > bestValue)
+			{
+				best.Clear();
+				best.Add(skill);
+				bestValue = value;
+			}
+			else if (value == bestValue)
+			{
+				best.Add(skill);
+			}
+		}
+
 		void FinishRun()
 		{
 			PlayerEntity player = GameManager.Instance.PlayerEntity;
+			EffectBundleSettings[] learnedSpellbook = keepLearnedSpellsOnExit ? player.SerializeSpellbook() : null;
 			DaggerfallUI.AddHUDText(ExitingText);
 			RemoveIssuedItems(player);
 			RemoveLessons(player.Items);
 			RemoveLessons(player.WagonItems);
+			RemoveLessons(player.OtherItems);
 			RemoveLessonsFromWorld();
 			RestoreStashedItems(player);
 			player.DeserializeSpellbook(data.OriginalSpellbook);
+			if (keepLearnedSpellsOnExit)
+				RestoreKeptLearnedSpells(player, learnedSpellbook);
 			data = new OSPData();
+		}
+
+		void RestoreKeptLearnedSpells(PlayerEntity player, EffectBundleSettings[] learnedSpellbook)
+		{
+			if (learnedSpellbook == null || learnedSpellbook.Length == 0)
+				return;
+
+			List<string> knownNames = new List<string>();
+			AddSpellNames(knownNames, data.OriginalSpellbook);
+			for (int i = 0; i < learnedSpellbook.Length; i++)
+			{
+				EffectBundleSettings spell = learnedSpellbook[i];
+				if (spell.Tag == StartingSpellTag || string.IsNullOrEmpty(spell.Name) || ContainsSpellName(knownNames, spell.Name))
+					continue;
+
+				player.AddSpell(spell);
+				knownNames.Add(spell.Name);
+			}
+		}
+
+		void AddSpellNames(List<string> names, EffectBundleSettings[] spells)
+		{
+			if (names == null || spells == null)
+				return;
+
+			for (int i = 0; i < spells.Length; i++)
+			{
+				if (!string.IsNullOrEmpty(spells[i].Name) && !ContainsSpellName(names, spells[i].Name))
+					names.Add(spells[i].Name);
+			}
+		}
+
+		bool ContainsSpellName(List<string> names, string name)
+		{
+			if (names == null || string.IsNullOrEmpty(name))
+				return false;
+
+			for (int i = 0; i < names.Count; i++)
+			{
+				if (string.Equals(names[i], name, StringComparison.OrdinalIgnoreCase))
+					return true;
+			}
+
+			return false;
 		}
 
 		void RestoreStashedItems(PlayerEntity player)
@@ -512,6 +621,11 @@ namespace OnSiteProcurementMod
 
 		bool AddTemporarySpell(int spellIndex)
 		{
+			return AddTemporarySpell(spellIndex, TempSpellTag);
+		}
+
+		bool AddTemporarySpell(int spellIndex, string tag)
+		{
 			SpellRecord.SpellRecordData spell;
 			EffectBundleSettings bundle;
 			if (!GameManager.Instance.EntityEffectBroker.GetClassicSpellRecord(spellIndex, out spell))
@@ -519,7 +633,7 @@ namespace OnSiteProcurementMod
 			if (!GameManager.Instance.EntityEffectBroker.ClassicSpellRecordDataToEffectBundleSettings(spell, BundleTypes.Spell, out bundle))
 				return false;
 
-			bundle.Tag = TempSpellTag;
+			bundle.Tag = tag;
 			GameManager.Instance.PlayerEntity.AddSpell(bundle);
 			return true;
 		}
@@ -529,7 +643,7 @@ namespace OnSiteProcurementMod
 			DaggerfallUnityItem lesson = ItemBuilder.CreateItem(ItemGroups.UselessItems2, (int)UselessItems2.Parchment);
 			lesson.shortName = LessonName;
 			lesson.message = LessonMarker;
-			lesson.value = RandomSpellIndex();
+			lesson.value = RandomLeveledSpellIndex();
 			return lesson;
 		}
 
@@ -548,6 +662,299 @@ namespace OnSiteProcurementMod
 			return spells[UnityEngine.Random.Range(0, spells.Count)].index;
 		}
 
+		int LowestSpellIndexForSkill(DFCareer.Skills skill)
+		{
+			int bestCost = int.MaxValue;
+			List<int> best = new List<int>();
+			foreach (SpellRecord.SpellRecordData spell in GameManager.Instance.EntityEffectBroker.StandardSpells)
+			{
+				if (!IsPublicSpell(spell) || spell.cost <= 0 || !SpellUsesSkill(spell, skill))
+					continue;
+
+				if (spell.cost < bestCost)
+				{
+					bestCost = spell.cost;
+					best.Clear();
+					best.Add(spell.index);
+				}
+				else if (spell.cost == bestCost)
+				{
+					best.Add(spell.index);
+				}
+			}
+
+			return best.Count > 0 ? best[UnityEngine.Random.Range(0, best.Count)] : RandomSpellIndex();
+		}
+
+		int RandomLeveledSpellIndex()
+		{
+			PlayerEntity player = GameManager.Instance.PlayerEntity;
+			int level = player != null ? player.Level : 1;
+			int minCost = int.MaxValue;
+			int maxCost = int.MinValue;
+			int count = 0;
+			double sum = 0;
+			double sumSquares = 0;
+			List<SpellRecord.SpellRecordData> spells = new List<SpellRecord.SpellRecordData>();
+
+			foreach (SpellRecord.SpellRecordData spell in GameManager.Instance.EntityEffectBroker.StandardSpells)
+			{
+				if (!IsPublicSpell(spell) || spell.cost <= 0)
+					continue;
+
+				if (spell.cost < minCost)
+					minCost = spell.cost;
+				if (spell.cost > maxCost)
+					maxCost = spell.cost;
+
+				count++;
+				sum += spell.cost;
+				sumSquares += (double)spell.cost * spell.cost;
+			}
+
+			if (count == 0)
+				return RandomSpellIndex();
+
+			double average = sum / count;
+			double variance = Math.Max(0, (sumSquares / count) - (average * average));
+			double standardDeviation = Math.Sqrt(variance);
+			double levelRatio = (Clamp(level, LessonMinLevel, LessonMaxLevel) - LessonMinLevel) / (double)(LessonMaxLevel - LessonMinLevel);
+			int targetCost = (int)Math.Round(minCost + ((maxCost - minCost) * levelRatio));
+			int bandMin = minCost;
+			int bandMax = Clamp((int)Math.Round(targetCost + standardDeviation), minCost, maxCost);
+
+			foreach (SpellRecord.SpellRecordData spell in GameManager.Instance.EntityEffectBroker.StandardSpells)
+			{
+				if (IsPublicSpell(spell) && spell.cost >= bandMin && spell.cost <= bandMax)
+					spells.Add(spell);
+			}
+
+			if (spells.Count > 0)
+				return spells[UnityEngine.Random.Range(0, spells.Count)].index;
+
+			return ClosestSpellIndexToCost(targetCost);
+		}
+
+		int ClosestSpellIndexToCost(int targetCost)
+		{
+			List<SpellRecord.SpellRecordData> spells = new List<SpellRecord.SpellRecordData>();
+			int bestDistance = int.MaxValue;
+			foreach (SpellRecord.SpellRecordData spell in GameManager.Instance.EntityEffectBroker.StandardSpells)
+			{
+				if (!IsPublicSpell(spell) || spell.cost <= 0)
+					continue;
+
+				int distance = Math.Abs(spell.cost - targetCost);
+				if (distance < bestDistance)
+				{
+					bestDistance = distance;
+					spells.Clear();
+					spells.Add(spell);
+				}
+				else if (distance == bestDistance)
+				{
+					spells.Add(spell);
+				}
+			}
+
+			if (spells.Count == 0)
+				return RandomSpellIndex();
+
+			return spells[UnityEngine.Random.Range(0, spells.Count)].index;
+		}
+
+		int Clamp(int value, int min, int max)
+		{
+			if (value < min)
+				return min;
+			if (value > max)
+				return max;
+			return value;
+		}
+
+		bool IsPublicSpell(SpellRecord.SpellRecordData spell)
+		{
+			return spell.effects != null &&
+				spell.effects.Length > 0 &&
+				!string.IsNullOrEmpty(spell.spellName) &&
+				!spell.spellName.StartsWith("!");
+		}
+
+		bool SpellUsesSkill(SpellRecord.SpellRecordData spell, DFCareer.Skills skill)
+		{
+			for (int i = 0; i < spell.effects.Length; i++)
+			{
+				if (EffectTypeSkill(spell.effects[i].type) == skill)
+					return true;
+			}
+
+			return false;
+		}
+
+		DFCareer.Skills EffectTypeSkill(int effectType)
+		{
+			switch (effectType)
+			{
+				case 0:
+				case 8:
+				case 25:
+				case 27:
+				case 28:
+				case 30:
+				case 32:
+				case 35:
+				case 38:
+				case 45:
+				case 46:
+					return DFCareer.Skills.Alteration;
+				case 3:
+				case 9:
+				case 10:
+				case 18:
+				case 20:
+				case 26:
+					return DFCareer.Skills.Restoration;
+				case 1:
+				case 4:
+				case 5:
+				case 7:
+				case 11:
+					return DFCareer.Skills.Destruction;
+				case 2:
+				case 6:
+				case 12:
+				case 16:
+				case 17:
+				case 19:
+				case 36:
+				case 37:
+				case 43:
+				case 44:
+					return DFCareer.Skills.Mysticism;
+				case 14:
+				case 21:
+				case 22:
+				case 31:
+				case 33:
+				case 34:
+				case 39:
+				case 40:
+				case 41:
+				case 47:
+				case 48:
+				case 49:
+				case 50:
+					return DFCareer.Skills.Thaumaturgy;
+				case 13:
+				case 15:
+				case 23:
+				case 24:
+				case 29:
+				case 42:
+					return DFCareer.Skills.Illusion;
+				default:
+					return DFCareer.Skills.None;
+			}
+		}
+
+		void SeedRandomForOSP(int salt)
+		{
+			if (pureChaosMode)
+				return;
+
+			UnityEngine.Random.InitState(CombineSeed(CurrentDungeonSeed(), salt));
+		}
+
+		int CurrentDungeonSeed()
+		{
+			if (data != null && data.RandomSeed != 0)
+				return data.RandomSeed;
+
+			int seed = BuildDungeonSeed(null);
+			if (data != null)
+				data.RandomSeed = seed;
+			return seed;
+		}
+
+		int BuildDungeonSeed(DaggerfallDungeon dungeon)
+		{
+			int seed = 17;
+			AddSeed(ref seed, "OSP");
+
+			if (dungeon == null)
+			{
+				PlayerEnterExit playerEnterExit = GameManager.Instance.PlayerEnterExit;
+				if (playerEnterExit != null)
+					dungeon = playerEnterExit.Dungeon;
+			}
+
+			if (dungeon != null)
+			{
+				AddSeed(ref seed, dungeon.Summary.ID);
+				AddSeed(ref seed, dungeon.Summary.RegionName);
+				AddSeed(ref seed, dungeon.Summary.LocationName);
+				AddSeed(ref seed, (int)dungeon.Summary.LocationType);
+				AddSeed(ref seed, (int)dungeon.Summary.DungeonType);
+				AddLocationSeed(ref seed, dungeon.Summary.LocationData);
+				return NormalizeSeed(seed);
+			}
+
+			PlayerGPS gps = GameManager.Instance.PlayerGPS;
+			if (gps != null)
+			{
+				AddSeed(ref seed, gps.CurrentRegionIndex);
+				AddSeed(ref seed, gps.CurrentLocationIndex);
+				AddSeed(ref seed, gps.CurrentMapID);
+				DFPosition pixel = gps.CurrentMapPixel;
+				if (pixel != null)
+				{
+					AddSeed(ref seed, pixel.X);
+					AddSeed(ref seed, pixel.Y);
+				}
+				if (gps.HasCurrentLocation)
+					AddLocationSeed(ref seed, gps.CurrentLocation);
+			}
+
+			return NormalizeSeed(seed);
+		}
+
+		void AddLocationSeed(ref int seed, DFLocation location)
+		{
+			if (!location.Loaded)
+				return;
+
+			AddSeed(ref seed, location.RegionIndex);
+			AddSeed(ref seed, location.LocationIndex);
+			AddSeed(ref seed, location.MapTableData.MapId);
+			AddSeed(ref seed, location.RegionName);
+			AddSeed(ref seed, location.Name);
+			AddSeed(ref seed, location.HasDungeon ? 1 : 0);
+		}
+
+		void AddSeed(ref int seed, int value)
+		{
+			seed = seed * 397 ^ value;
+		}
+
+		void AddSeed(ref int seed, string value)
+		{
+			if (string.IsNullOrEmpty(value))
+				return;
+
+			for (int i = 0; i < value.Length; i++)
+				seed = seed * 397 ^ value[i];
+		}
+
+		int CombineSeed(int seed, int salt)
+		{
+			return NormalizeSeed(seed * 397 ^ salt);
+		}
+
+		int NormalizeSeed(int seed)
+		{
+			return seed != 0 ? seed : 1;
+		}
+
 		bool IsLesson(DaggerfallUnityItem item)
 		{
 			return item != null && item.IsParchment && item.message == LessonMarker;
@@ -556,9 +963,16 @@ namespace OnSiteProcurementMod
 		void InjectDungeonFallbackLoot()
 		{
 			DaggerfallLoot loot = CreateFallbackLootContainer();
-			loot.Items.AddItem(ItemBuilder.CreateItem(ItemGroups.MiscItems, (int)MiscItems.Spellbook));
-			loot.Items.AddItem(CreateLesson());
-			data.SpellbookInjected = true;
+			if (!data.SpellbookInjected)
+			{
+				loot.Items.AddItem(ItemBuilder.CreateItem(ItemGroups.MiscItems, (int)MiscItems.Spellbook));
+				data.SpellbookInjected = true;
+			}
+			if (!data.LessonInjected)
+			{
+				loot.Items.AddItem(CreateLesson());
+				data.LessonInjected = true;
+			}
 		}
 
 		DaggerfallLoot CreateFallbackLootContainer()
@@ -611,6 +1025,8 @@ namespace OnSiteProcurementMod
 		{
 			public bool Active;
 			public bool SpellbookInjected;
+			public bool LessonInjected;
+			public int RandomSeed;
 			public int StashedGold;
 			public ulong OriginalLightSourceUid;
 			public ulong[] IssuedItemUids = new ulong[0];

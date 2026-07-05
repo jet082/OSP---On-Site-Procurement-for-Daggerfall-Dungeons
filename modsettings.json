@@ -26,6 +26,27 @@
 					"Description": "If disabled, a guaranteed spellbook is somewhere in the dungeon",
 					"$version": "v1",
 					"$type": "DaggerfallWorkshop.Game.Utility.ModSupport.ModSettings.ToggleKey"
+				},
+				{
+					"Value": false,
+					"Name": "KeepLearnedSpellsOnExit",
+					"Description": "Keep spells learned in the dungeon when leaving",
+					"$version": "v1",
+					"$type": "DaggerfallWorkshop.Game.Utility.ModSupport.ModSettings.ToggleKey"
+				},
+				{
+					"Value": false,
+					"Name": "PureChaosMode",
+					"Description": "Dungeon starting gear will be inconsistent across entries",
+					"$version": "v1",
+					"$type": "DaggerfallWorkshop.Game.Utility.ModSupport.ModSettings.ToggleKey"
+				},
+				{
+					"Value": false,
+					"Name": "TrueOSPMode",
+					"Description": "Start each dungeon with literally nothing",
+					"$version": "v1",
+					"$type": "DaggerfallWorkshop.Game.Utility.ModSupport.ModSettings.ToggleKey"
 				}
 			]
 		}
