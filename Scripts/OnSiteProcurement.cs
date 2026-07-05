@@ -105,6 +105,7 @@ namespace OnSiteProcurementMod
 		bool pureChaosMode;
 		bool trueOSPMode;
 		bool guaranteedPathToKillAllEnemies = true;
+		bool dungeonSpoilerLog;
 		bool startingDungeonEntryPending;
 		System.Random lessonRandom = new System.Random();
 
@@ -150,6 +151,7 @@ namespace OnSiteProcurementMod
 			pureChaosMode = settings.GetBool("General", "PureChaosMode");
 			trueOSPMode = settings.GetBool("General", "TrueOSPMode");
 			guaranteedPathToKillAllEnemies = settings.GetBool("General", "GuaranteedPathToKillAllEnemies");
+			dungeonSpoilerLog = settings.GetBool("General", "DungeonSpoilerLog");
 		}
 
 		void OnEnable()
@@ -1233,8 +1235,11 @@ namespace OnSiteProcurementMod
 				return;
 
 			WeaponMaterialTypes required = RequiredDungeonMaterial();
+			if (dungeonSpoilerLog)
+				LogKillPathInputs(required, loots);
 			if (required <= WeaponMaterialTypes.Iron)
 			{
+				LogKillPath("No gated enemies found.");
 				data.KillPathWeaponSatisfied = true;
 				return;
 			}
@@ -1242,6 +1247,7 @@ namespace OnSiteProcurementMod
 			WeaponMaterialTypes material = MinimumMaterialNeededForKillPath(required, loots);
 			if (material <= WeaponMaterialTypes.Iron)
 			{
+				LogKillPath("Existing loot/enemy chain reaches " + required + "; no weapon injected.");
 				data.KillPathWeaponSatisfied = true;
 				return;
 			}
@@ -1250,7 +1256,9 @@ namespace OnSiteProcurementMod
 			if (loot == null)
 				loot = CreateFallbackLootContainer();
 
-			AddKillPathWeaponToLoot(loot, RandomWeaponPathSkill(), material);
+			DFCareer.Skills skill = RandomWeaponPathSkill();
+			AddKillPathWeaponToLoot(loot, skill, material);
+			LogKillPath("Injected " + material + " " + skill + " path weapon into " + LootLabel(loot) + (skill == DFCareer.Skills.Archery ? " with arrows." : "."));
 			data.KillPathWeaponSatisfied = true;
 		}
 
@@ -1284,20 +1292,20 @@ namespace OnSiteProcurementMod
 
 		WeaponMaterialTypes MinimumMaterialNeededForKillPath(WeaponMaterialTypes required, List<DaggerfallLoot> loots)
 		{
-			if (MaterialPathProvides(required, loots, WeaponMaterialTypes.None))
+			if (MaterialPathProvides(required, loots, WeaponMaterialTypes.None, dungeonSpoilerLog))
 				return WeaponMaterialTypes.None;
 
 			for (int material = (int)WeaponMaterialTypes.Steel; material <= (int)required; material++)
 			{
 				WeaponMaterialTypes candidate = (WeaponMaterialTypes)material;
-				if (MaterialPathProvides(required, loots, candidate))
+				if (MaterialPathProvides(required, loots, candidate, dungeonSpoilerLog))
 					return candidate;
 			}
 
 			return required;
 		}
 
-		bool MaterialPathProvides(WeaponMaterialTypes required, List<DaggerfallLoot> loots, WeaponMaterialTypes bonusMaterial)
+		bool MaterialPathProvides(WeaponMaterialTypes required, List<DaggerfallLoot> loots, WeaponMaterialTypes bonusMaterial, bool log)
 		{
 			WeaponMaterialTypes accessible = WeaponMaterialTypes.Iron;
 			accessible = MaxMaterial(accessible, bonusMaterial);
@@ -1305,18 +1313,30 @@ namespace OnSiteProcurementMod
 			if (player != null)
 				accessible = MaxMaterial(accessible, MaxWeaponMaterialInCollection(player.Items));
 
+			string candidate = bonusMaterial > WeaponMaterialTypes.Iron ? bonusMaterial.ToString() : "none";
+			if (log)
+				LogKillPath("Candidate injected material " + candidate + " starts at " + accessible + ".");
+
 			bool changed = true;
 			while (changed)
 			{
 				changed = false;
 				WeaponMaterialTypes next = accessible;
+				string source = string.Empty;
 
 				if (loots != null)
 				{
 					for (int i = 0; i < loots.Count; i++)
 					{
-						if (loots[i] != null)
-							next = MaxMaterial(next, MaxWeaponMaterialInCollection(loots[i].Items));
+						if (loots[i] == null)
+							continue;
+
+						WeaponMaterialTypes found = MaxWeaponMaterialInCollection(loots[i].Items);
+						if (found > next)
+						{
+							next = found;
+							source = LootLabel(loots[i]);
+						}
 					}
 				}
 
@@ -1324,17 +1344,84 @@ namespace OnSiteProcurementMod
 				{
 					EnemyEntity enemy;
 					if (TryGetRelevantEnemy(entityBehaviour, out enemy) && enemy.MobileEnemy.MinMetalToHit <= accessible)
-						next = MaxMaterial(next, MaxWeaponMaterialInCollection(enemy.Items));
+					{
+						WeaponMaterialTypes found = MaxWeaponMaterialInCollection(enemy.Items);
+						if (found > next)
+						{
+							next = found;
+							source = EnemyLabel(enemy) + " corpse path";
+						}
+					}
 				}
 
 				if (next > accessible)
 				{
+					if (log)
+						LogKillPath("Candidate " + candidate + " advances " + accessible + " -> " + next + " via " + source + ".");
 					accessible = next;
 					changed = true;
 				}
 			}
 
+			if (log)
+				LogKillPath("Candidate " + candidate + " " + (accessible >= required ? "reaches" : "stops at") + " " + accessible + " (target " + required + ").");
 			return accessible >= required;
+		}
+
+		void LogKillPathInputs(WeaponMaterialTypes required, List<DaggerfallLoot> loots)
+		{
+			LogKillPath("Checking dungeon. Required material: " + required + ". Eligible loot containers: " + (loots != null ? loots.Count : 0) + ".");
+			if (loots != null)
+			{
+				for (int i = 0; i < loots.Count; i++)
+				{
+					if (loots[i] != null)
+						LogKillPath("Loot " + LootLabel(loots[i]) + " pathWeaponMax=" + MaxWeaponMaterialInCollection(loots[i].Items) + ".");
+				}
+			}
+
+			foreach (DaggerfallEntityBehaviour entityBehaviour in ActiveGameObjectDatabase.GetActiveEnemyBehaviours())
+			{
+				EnemyEntity enemy;
+				if (TryGetRelevantEnemy(entityBehaviour, out enemy))
+					LogKillPath("Enemy " + EnemyLabel(enemy) + " requires=" + enemy.MobileEnemy.MinMetalToHit + " carriesPathWeaponMax=" + MaxWeaponMaterialInCollection(enemy.Items) + ".");
+			}
+
+			foreach (FoeSpawner spawner in ActiveGameObjectDatabase.GetActiveFoeSpawners())
+			{
+				if (spawner == null || spawner.AlliedToPlayer || spawner.SpawnCount <= 0 || spawner.FoeType == MobileTypes.None)
+					continue;
+
+				MobileEnemy enemy;
+				if (EnemyBasics.GetEnemy(spawner.FoeType, out enemy))
+					LogKillPath("Spawner " + spawner.FoeType + " x" + spawner.SpawnCount + " requires=" + enemy.MinMetalToHit + ".");
+			}
+		}
+
+		void LogKillPath(string message)
+		{
+			if (!dungeonSpoilerLog)
+				return;
+
+			Debug.Log("[OSP] Guaranteed Path: " + message);
+		}
+
+		string LootLabel(DaggerfallLoot loot)
+		{
+			if (loot == null)
+				return "unknown loot";
+
+			return loot.ContainerType + " LoadID=" + loot.LoadID;
+		}
+
+		string EnemyLabel(EnemyEntity enemy)
+		{
+			if (enemy == null)
+				return "unknown enemy";
+			if (TextManager.Instance != null)
+				return TextManager.Instance.GetLocalizedEnemyName(enemy.MobileEnemy.ID);
+
+			return ((MobileTypes)enemy.MobileEnemy.ID).ToString();
 		}
 
 		bool TryGetRelevantEnemy(DaggerfallEntityBehaviour entityBehaviour, out EnemyEntity enemy)

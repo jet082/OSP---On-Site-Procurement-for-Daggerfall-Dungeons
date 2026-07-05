@@ -54,6 +54,13 @@
 					"Description": "Ensure a weapon path exists to kill all enemies with melee weapons",
 					"$version": "v1",
 					"$type": "DaggerfallWorkshop.Game.Utility.ModSupport.ModSettings.ToggleKey"
+				},
+				{
+					"Value": false,
+					"Name": "DungeonSpoilerLog",
+					"Description": "Print dungeon weapon logic to Player.log",
+					"$version": "v1",
+					"$type": "DaggerfallWorkshop.Game.Utility.ModSupport.ModSettings.ToggleKey"
 				}
 			]
 		}
