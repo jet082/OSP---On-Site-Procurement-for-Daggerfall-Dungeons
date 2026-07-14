@@ -38,12 +38,21 @@ namespace OnSiteProcurementMod
 		const double ExtraSpellbookChance = 0.08;
 		const int RandomOption = -1;
 		const int CustomClassOption = -2;
+		const int PureChaosClassOption = -3;
 		const int RandomLevelOption = 0;
 		const int LevelDistributionRandom = 0;
 		const int LevelDistributionPlayerChosen = 1;
 		const int SkillGrowthDefaultWeights = 0;
 		const int SkillGrowthCustomWeights = 1;
 		const int SkillGrowthCompletelyRandom = 2;
+		const int DungeonStartEntrance = 0;
+		const int DungeonStartQuestMarker = 1;
+		const int DungeonStartPureRandom = 2;
+		const int EditorFlatArchive = 199;
+		const int StartMarkerFlatIndex = 10;
+		const int EnterMarkerFlatIndex = 8;
+		const int QuestSpawnMarkerFlatIndex = 11;
+		const int QuestItemMarkerFlatIndex = 18;
 
 		static Mod mod;
 		static OnSiteProcurement instance;
@@ -168,6 +177,10 @@ namespace OnSiteProcurementMod
 		int queuedPlayerChosenLevelTarget;
 		int queuedPlayerChosenLevelDelay;
 		int queuedPlayerChosenBonusPool;
+		int queuedDungeonStartLocation;
+		int queuedDungeonStartDelay;
+		DaggerfallDungeon queuedDungeonStartDungeon;
+		DFLocation queuedDungeonStartDFLocation;
 		bool queuedPlayerChosenBonusPoolApplied;
 		DaggerfallStartWindow titleButtonWindow;
 		RandomRunRequest pendingRandomRun;
@@ -266,6 +279,7 @@ namespace OnSiteProcurementMod
 			}
 
 			UpdateQueuedPlayerChosenLevelUp();
+			UpdateQueuedDungeonStartLocation();
 			UpdateInitialLootPlacement();
 		}
 
@@ -289,6 +303,10 @@ namespace OnSiteProcurementMod
 			initialLootPlacementFrames = InitialLootPlacementDelayFrames;
 			startingDungeonEntryPending = false;
 			pendingRandomRun = null;
+			queuedDungeonStartLocation = DungeonStartEntrance;
+			queuedDungeonStartDelay = 0;
+			queuedDungeonStartDungeon = null;
+			queuedDungeonStartDFLocation = new DFLocation();
 		}
 
 		void OnNewGame()
@@ -348,7 +366,7 @@ namespace OnSiteProcurementMod
 
 			if (titleButtonWindow != start)
 			{
-				Button button = DaggerfallUI.AddTextButton(new Rect(96, 160, 128, 15), "OSP Quickstart", start.NativePanel);
+				Button button = DaggerfallUI.AddTextButton(new Rect(85, 170, 128, 15), "OSP Quickstart", start.NativePanel);
 				button.BackgroundColor = new Color32(35, 20, 8, 220);
 				button.Outline.Color = new Color32(214, 176, 82, 255);
 				button.Label.TextColor = new Color32(255, 230, 130, 255);
@@ -402,6 +420,7 @@ namespace OnSiteProcurementMod
 			pendingRandomRun.PreviousStartInDungeon = DaggerfallUnity.Settings.StartInDungeon;
 			pendingRandomRun.PlayerChosenLevelDistribution = selection.LevelDistribution == LevelDistributionPlayerChosen;
 			pendingRandomRun.PlayerChosenBonusPool = RollLevelUpBonusPool(level - 1, random);
+			pendingRandomRun.DungeonStartLocation = selection.DungeonStartLocation;
 
 			DaggerfallUnity.Settings.StartCellX = mapPixel.X;
 			DaggerfallUnity.Settings.StartCellY = mapPixel.Y;
@@ -500,6 +519,126 @@ namespace OnSiteProcurementMod
 			player.FillVitalSigns();
 			player.ReadyToLevelUp = true;
 			DaggerfallUI.PostMessage(DaggerfallUIMessages.dfuiOpenCharacterSheetWindow);
+		}
+
+		void UpdateQueuedDungeonStartLocation()
+		{
+			if (queuedDungeonStartLocation == DungeonStartEntrance)
+				return;
+
+			if (queuedDungeonStartDelay > 0)
+			{
+				queuedDungeonStartDelay--;
+				return;
+			}
+
+			if (queuedDungeonStartLocation == DungeonStartQuestMarker)
+				MovePlayerToRandomQuestMarker();
+			else if (queuedDungeonStartLocation == DungeonStartPureRandom)
+				MovePlayerToPureRandomDungeonMarker();
+
+			queuedDungeonStartLocation = DungeonStartEntrance;
+			queuedDungeonStartDungeon = null;
+			queuedDungeonStartDFLocation = new DFLocation();
+		}
+
+		void MovePlayerToRandomQuestMarker()
+		{
+			List<Vector3> positions = GetQuestMarkerPositions(queuedDungeonStartDFLocation);
+			if (positions.Count == 0)
+			{
+				DaggerfallUI.AddHUDText("No quest marker start found. Using entrance.");
+				return;
+			}
+
+			MovePlayerToDungeonPosition(positions[lessonRandom.Next(positions.Count)]);
+		}
+
+		void MovePlayerToPureRandomDungeonMarker()
+		{
+			List<Vector3> positions = GetSceneEditorMarkerPositions();
+			if (positions.Count == 0)
+			{
+				MovePlayerToRandomQuestMarker();
+				return;
+			}
+
+			MovePlayerToDungeonPosition(positions[lessonRandom.Next(positions.Count)]);
+		}
+
+		void MovePlayerToDungeonPosition(Vector3 localPosition)
+		{
+			if (queuedDungeonStartDungeon == null)
+				return;
+
+			GameManager gameManager = GameManager.Instance;
+			if (gameManager == null || gameManager.PlayerObject == null)
+				return;
+
+			gameManager.PlayerObject.transform.position = queuedDungeonStartDungeon.transform.TransformPoint(localPosition);
+			if (gameManager.PlayerMotor != null)
+				gameManager.PlayerMotor.FixStanding();
+		}
+
+		List<Vector3> GetQuestMarkerPositions(DFLocation location)
+		{
+			List<Vector3> positions = new List<Vector3>();
+			if (!location.Loaded || !location.HasDungeon || location.Dungeon.Blocks == null)
+				return positions;
+
+			for (int i = 0; i < location.Dungeon.Blocks.Length; i++)
+			{
+				DFLocation.DungeonBlock dungeonBlock = location.Dungeon.Blocks[i];
+				DFBlock blockData = DaggerfallUnity.Instance.ContentReader.BlockFileReader.GetBlock(dungeonBlock.BlockName);
+				if (blockData.RdbBlock.ObjectRootList == null)
+					continue;
+
+				for (int groupIndex = 0; groupIndex < blockData.RdbBlock.ObjectRootList.Length; groupIndex++)
+				{
+					DFBlock.RdbObjectRoot group = blockData.RdbBlock.ObjectRootList[groupIndex];
+					if (group.RdbObjects == null)
+						continue;
+
+					for (int objectIndex = 0; objectIndex < group.RdbObjects.Length; objectIndex++)
+					{
+						DFBlock.RdbObject obj = group.RdbObjects[objectIndex];
+						if (obj.Type != DFBlock.RdbResourceTypes.Flat)
+							continue;
+
+						int archive = obj.Resources.FlatResource.TextureArchive;
+						int record = obj.Resources.FlatResource.TextureRecord;
+						if (archive != EditorFlatArchive || (record != QuestSpawnMarkerFlatIndex && record != QuestItemMarkerFlatIndex))
+							continue;
+
+						Vector3 blockPosition = new Vector3(dungeonBlock.X * RDBLayout.RDBSide, 0, dungeonBlock.Z * RDBLayout.RDBSide);
+						Vector3 markerPosition = new Vector3(obj.XPos, -obj.YPos, obj.ZPos) * MeshReader.GlobalScale;
+						positions.Add(blockPosition + markerPosition);
+					}
+				}
+			}
+
+			return positions;
+		}
+
+		List<Vector3> GetSceneEditorMarkerPositions()
+		{
+			List<Vector3> positions = new List<Vector3>();
+			if (queuedDungeonStartDungeon == null)
+				return positions;
+
+			Billboard[] billboards = queuedDungeonStartDungeon.GetComponentsInChildren<Billboard>(true);
+			for (int i = 0; i < billboards.Length; i++)
+			{
+				Billboard billboard = billboards[i];
+				if (billboard.Summary.Archive != EditorFlatArchive)
+					continue;
+				if (billboard.Summary.Record == StartMarkerFlatIndex || billboard.Summary.Record == EnterMarkerFlatIndex)
+					continue;
+
+				positions.Add(queuedDungeonStartDungeon.transform.InverseTransformPoint(billboard.transform.position));
+			}
+
+			return positions;
 		}
 
 		bool ApplyQueuedBonusPool(DaggerfallCharacterSheetWindow characterSheet)
@@ -709,11 +848,22 @@ namespace OnSiteProcurementMod
 				document.armorValues[i] = 100;
 			if (isCustom)
 			{
-				document.reputationMerchants = selection.MerchantsRep;
-				document.reputationCommoners = selection.PeasantsRep;
-				document.reputationScholars = selection.ScholarsRep;
-				document.reputationNobility = selection.NobilityRep;
-				document.reputationUnderworld = selection.UnderworldRep;
+				if (selection.ClassIndex == PureChaosClassOption)
+				{
+					document.reputationMerchants = RandomReputation(random);
+					document.reputationCommoners = RandomReputation(random);
+					document.reputationScholars = RandomReputation(random);
+					document.reputationNobility = RandomReputation(random);
+					document.reputationUnderworld = RandomReputation(random);
+				}
+				else
+				{
+					document.reputationMerchants = selection.MerchantsRep;
+					document.reputationCommoners = selection.PeasantsRep;
+					document.reputationScholars = selection.ScholarsRep;
+					document.reputationNobility = selection.NobilityRep;
+					document.reputationUnderworld = selection.UnderworldRep;
+				}
 			}
 
 			document.workingStats.SetPermanentFromCareer(career);
@@ -773,6 +923,13 @@ namespace OnSiteProcurementMod
 				return CreateRandomCustomCareer(random);
 			}
 
+			if (selectedClass == PureChaosClassOption)
+			{
+				isCustom = true;
+				classIndex = -1;
+				return CreatePureChaosCareer(random);
+			}
+
 			selectedClass = Mathf.Clamp(selectedClass, 0, PlayableClassCareers.Length - 1);
 			ClassCareers careerId = PlayableClassCareers[selectedClass];
 			DFCareer career = DaggerfallEntity.GetClassCareerTemplate(careerId);
@@ -793,6 +950,54 @@ namespace OnSiteProcurementMod
 			DFCareer career = CloneCareer(baseCareer);
 			career.Name = "Custom";
 			List<DFCareer.Skills> skills = BuildCustomSkillOrder(random);
+			SetCareerSkillSlots(career, skills);
+			career.HitPointsPerLevel = random.Next(8, 21);
+			career.ForbiddenProficiencies = (DFCareer.ProficiencyFlags)0;
+			career.ExpertProficiencies = (DFCareer.ProficiencyFlags)0;
+			career.ShortBlades = DFCareer.Proficiency.Normal;
+			career.LongBlades = DFCareer.Proficiency.Normal;
+			career.HandToHand = DFCareer.Proficiency.Normal;
+			career.Axes = DFCareer.Proficiency.Normal;
+			career.BluntWeapons = DFCareer.Proficiency.Normal;
+			career.MissileWeapons = DFCareer.Proficiency.Normal;
+			SetCustomSpellPoints(career, CountMagicSkillsInClass(career));
+			return career;
+		}
+
+		DFCareer CreatePureChaosCareer(System.Random random)
+		{
+			DFCareer career = CreateRandomCustomCareer(random);
+			career.Name = "Pure Chaos";
+			List<DFCareer.Skills> skills = GetAllSkills();
+			Shuffle(skills, random);
+			SetCareerSkillSlots(career, skills);
+			RandomizeCareerAttributes(career, random);
+			career.HitPointsPerLevel = random.Next(4, 31);
+			career.AdvancementMultiplier = (float)(0.3 + random.NextDouble() * 2.7);
+			RandomizeCareerSpecials(career, random);
+			return career;
+		}
+
+		short RandomReputation(System.Random random)
+		{
+			return (short)random.Next(-50, 51);
+		}
+
+		void RandomizeCareerAttributes(DFCareer career, System.Random random)
+		{
+			int max = FormulaHelper.MaxStatValue();
+			career.Strength = random.Next(10, max + 1);
+			career.Intelligence = random.Next(10, max + 1);
+			career.Willpower = random.Next(10, max + 1);
+			career.Agility = random.Next(10, max + 1);
+			career.Endurance = random.Next(10, max + 1);
+			career.Personality = random.Next(10, max + 1);
+			career.Speed = random.Next(10, max + 1);
+			career.Luck = random.Next(10, max + 1);
+		}
+
+		void SetCareerSkillSlots(DFCareer career, List<DFCareer.Skills> skills)
+		{
 			career.PrimarySkill1 = skills[0];
 			career.PrimarySkill2 = skills[1];
 			career.PrimarySkill3 = skills[2];
@@ -805,16 +1010,243 @@ namespace OnSiteProcurementMod
 			career.MinorSkill4 = skills[9];
 			career.MinorSkill5 = skills[10];
 			career.MinorSkill6 = skills[11];
-			career.HitPointsPerLevel = random.Next(8, 21);
-			career.ForbiddenProficiencies = (DFCareer.ProficiencyFlags)0;
-			career.ShortBlades = DFCareer.Proficiency.Normal;
-			career.LongBlades = DFCareer.Proficiency.Normal;
-			career.HandToHand = DFCareer.Proficiency.Normal;
-			career.Axes = DFCareer.Proficiency.Normal;
-			career.BluntWeapons = DFCareer.Proficiency.Normal;
-			career.MissileWeapons = DFCareer.Proficiency.Normal;
-			SetCustomSpellPoints(career, CountMagicSkillsInClass(career));
-			return career;
+		}
+
+		void Shuffle<T>(List<T> list, System.Random random)
+		{
+			for (int i = list.Count - 1; i > 0; i--)
+			{
+				int j = random.Next(i + 1);
+				T value = list[i];
+				list[i] = list[j];
+				list[j] = value;
+			}
+		}
+
+		void RandomizeCareerSpecials(DFCareer career, System.Random random)
+		{
+			career.Paralysis = RandomTolerance(random);
+			career.Magic = RandomTolerance(random);
+			career.Poison = RandomTolerance(random);
+			career.Fire = RandomTolerance(random);
+			career.Frost = RandomTolerance(random);
+			career.Shock = RandomTolerance(random);
+			career.Disease = RandomTolerance(random);
+
+			career.ShortBlades = RandomProficiency(random);
+			career.LongBlades = RandomProficiency(random);
+			career.HandToHand = RandomProficiency(random);
+			career.Axes = RandomProficiency(random);
+			career.BluntWeapons = RandomProficiency(random);
+			career.MissileWeapons = RandomProficiency(random);
+			SetProficiencyFlags(career);
+
+			career.UndeadAttackModifier = RandomAttackModifier(random);
+			career.DaedraAttackModifier = RandomAttackModifier(random);
+			career.HumanoidAttackModifier = RandomAttackModifier(random);
+			career.AnimalsAttackModifier = RandomAttackModifier(random);
+
+			career.DarknessPoweredMagery = RandomDarknessMagery(random);
+			career.LightPoweredMagery = RandomLightMagery(random);
+			career.ForbiddenMaterials = RandomMaterialFlags(random);
+			career.ForbiddenShields = RandomShieldFlags(random);
+			career.ForbiddenArmors = RandomArmorFlags(random);
+			SetSpellPointMultiplier(career, RandomSpellPointMultiplier(random));
+			career.SpellAbsorption = RandomSpellAbsorption(random);
+			career.NoRegenSpellPoints = random.Next(2) == 0;
+			career.AcuteHearing = random.Next(2) == 0;
+			career.Athleticism = random.Next(2) == 0;
+			career.AdrenalineRush = random.Next(2) == 0;
+			career.Regeneration = RandomRegeneration(random);
+			career.RapidHealing = RandomRapidHealing(random);
+			career.DamageFromSunlight = random.Next(2) == 0;
+			career.DamageFromHolyPlaces = random.Next(2) == 0;
+		}
+
+		DFCareer.Tolerance RandomTolerance(System.Random random)
+		{
+			return (DFCareer.Tolerance)random.Next(0, 5);
+		}
+
+		DFCareer.Proficiency RandomProficiency(System.Random random)
+		{
+			return (DFCareer.Proficiency)random.Next(0, 3);
+		}
+
+		DFCareer.AttackModifier RandomAttackModifier(System.Random random)
+		{
+			return (DFCareer.AttackModifier)random.Next(0, 3);
+		}
+
+		DFCareer.DarknessMageryFlags RandomDarknessMagery(System.Random random)
+		{
+			switch (random.Next(3))
+			{
+				case 1:
+					return DFCareer.DarknessMageryFlags.UnableToCastInLight;
+				case 2:
+					return DFCareer.DarknessMageryFlags.ReducedPowerInLight;
+				default:
+					return DFCareer.DarknessMageryFlags.Normal;
+			}
+		}
+
+		DFCareer.LightMageryFlags RandomLightMagery(System.Random random)
+		{
+			switch (random.Next(3))
+			{
+				case 1:
+					return DFCareer.LightMageryFlags.UnableToCastInDarkness;
+				case 2:
+					return DFCareer.LightMageryFlags.ReducedPowerInDarkness;
+				default:
+					return DFCareer.LightMageryFlags.Normal;
+			}
+		}
+
+		DFCareer.SpellPointMultipliers RandomSpellPointMultiplier(System.Random random)
+		{
+			switch (random.Next(6))
+			{
+				case 0:
+					return DFCareer.SpellPointMultipliers.Times_0_50;
+				case 1:
+					return DFCareer.SpellPointMultipliers.Times_1_00;
+				case 2:
+					return DFCareer.SpellPointMultipliers.Times_1_50;
+				case 3:
+					return DFCareer.SpellPointMultipliers.Times_1_75;
+				case 4:
+					return DFCareer.SpellPointMultipliers.Times_2_00;
+				default:
+					return DFCareer.SpellPointMultipliers.Times_3_00;
+			}
+		}
+
+		void SetSpellPointMultiplier(DFCareer career, DFCareer.SpellPointMultipliers multiplier)
+		{
+			career.SpellPointMultiplier = multiplier;
+			switch (multiplier)
+			{
+				case DFCareer.SpellPointMultipliers.Times_0_50:
+					career.SpellPointMultiplierValue = 0.5f;
+					break;
+				case DFCareer.SpellPointMultipliers.Times_1_00:
+					career.SpellPointMultiplierValue = 1.0f;
+					break;
+				case DFCareer.SpellPointMultipliers.Times_1_50:
+					career.SpellPointMultiplierValue = 1.5f;
+					break;
+				case DFCareer.SpellPointMultipliers.Times_1_75:
+					career.SpellPointMultiplierValue = 1.75f;
+					break;
+				case DFCareer.SpellPointMultipliers.Times_2_00:
+					career.SpellPointMultiplierValue = 2.0f;
+					break;
+				default:
+					career.SpellPointMultiplierValue = 3.0f;
+					break;
+			}
+		}
+
+		DFCareer.SpellAbsorptionFlags RandomSpellAbsorption(System.Random random)
+		{
+			switch (random.Next(4))
+			{
+				case 1:
+					return DFCareer.SpellAbsorptionFlags.InLight;
+				case 2:
+					return DFCareer.SpellAbsorptionFlags.InDarkness;
+				case 3:
+					return DFCareer.SpellAbsorptionFlags.Always;
+				default:
+					return DFCareer.SpellAbsorptionFlags.None;
+			}
+		}
+
+		DFCareer.RegenerationFlags RandomRegeneration(System.Random random)
+		{
+			switch (random.Next(5))
+			{
+				case 1:
+					return DFCareer.RegenerationFlags.InLight;
+				case 2:
+					return DFCareer.RegenerationFlags.InDarkness;
+				case 3:
+					return DFCareer.RegenerationFlags.InWater;
+				case 4:
+					return DFCareer.RegenerationFlags.Always;
+				default:
+					return DFCareer.RegenerationFlags.None;
+			}
+		}
+
+		DFCareer.RapidHealingFlags RandomRapidHealing(System.Random random)
+		{
+			switch (random.Next(4))
+			{
+				case 1:
+					return DFCareer.RapidHealingFlags.InLight;
+				case 2:
+					return DFCareer.RapidHealingFlags.InDarkness;
+				case 3:
+					return DFCareer.RapidHealingFlags.Always;
+				default:
+					return DFCareer.RapidHealingFlags.None;
+			}
+		}
+
+		DFCareer.MaterialFlags RandomMaterialFlags(System.Random random)
+		{
+			DFCareer.MaterialFlags flags = 0;
+			foreach (DFCareer.MaterialFlags flag in Enum.GetValues(typeof(DFCareer.MaterialFlags)))
+			{
+				if (random.Next(2) == 0)
+					flags |= flag;
+			}
+			return flags;
+		}
+
+		DFCareer.ShieldFlags RandomShieldFlags(System.Random random)
+		{
+			DFCareer.ShieldFlags flags = 0;
+			foreach (DFCareer.ShieldFlags flag in Enum.GetValues(typeof(DFCareer.ShieldFlags)))
+			{
+				if (random.Next(2) == 0)
+					flags |= flag;
+			}
+			return flags;
+		}
+
+		DFCareer.ArmorFlags RandomArmorFlags(System.Random random)
+		{
+			DFCareer.ArmorFlags flags = 0;
+			foreach (DFCareer.ArmorFlags flag in Enum.GetValues(typeof(DFCareer.ArmorFlags)))
+			{
+				if (random.Next(2) == 0)
+					flags |= flag;
+			}
+			return flags;
+		}
+
+		void SetProficiencyFlags(DFCareer career)
+		{
+			career.ForbiddenProficiencies = 0;
+			career.ExpertProficiencies = 0;
+			AddProficiencyFlag(career, DFCareer.ProficiencyFlags.ShortBlades, career.ShortBlades);
+			AddProficiencyFlag(career, DFCareer.ProficiencyFlags.LongBlades, career.LongBlades);
+			AddProficiencyFlag(career, DFCareer.ProficiencyFlags.HandToHand, career.HandToHand);
+			AddProficiencyFlag(career, DFCareer.ProficiencyFlags.Axes, career.Axes);
+			AddProficiencyFlag(career, DFCareer.ProficiencyFlags.BluntWeapons, career.BluntWeapons);
+			AddProficiencyFlag(career, DFCareer.ProficiencyFlags.MissileWeapons, career.MissileWeapons);
+		}
+
+		void AddProficiencyFlag(DFCareer career, DFCareer.ProficiencyFlags flag, DFCareer.Proficiency proficiency)
+		{
+			if (proficiency == DFCareer.Proficiency.Forbidden)
+				career.ForbiddenProficiencies |= flag;
+			else if (proficiency == DFCareer.Proficiency.Expert)
+				career.ExpertProficiencies |= flag;
 		}
 
 		DFCareer CloneCareer(DFCareer source)
@@ -1184,8 +1616,22 @@ namespace OnSiteProcurementMod
 				});
 			}
 
+			QueueDungeonStartRelocation(args);
 			QueueInitialLootPlacement();
 			entryPending = false;
+		}
+
+		void QueueDungeonStartRelocation(PlayerEnterExit.TransitionEventArgs args)
+		{
+			if (pendingRandomRun == null || pendingRandomRun.DungeonStartLocation == DungeonStartEntrance)
+				return;
+			if (args == null || args.DaggerfallDungeon == null)
+				return;
+
+			queuedDungeonStartLocation = pendingRandomRun.DungeonStartLocation;
+			queuedDungeonStartDelay = 1;
+			queuedDungeonStartDungeon = args.DaggerfallDungeon;
+			queuedDungeonStartDFLocation = args.DaggerfallDungeon.Summary.LocationData;
 		}
 
 		void OnTransitionDungeonExterior(PlayerEnterExit.TransitionEventArgs args)
@@ -2581,6 +3027,7 @@ namespace OnSiteProcurementMod
 			public bool LevelApplied;
 			public bool PlayerChosenLevelDistribution;
 			public int PlayerChosenBonusPool;
+			public int DungeonStartLocation;
 		}
 
 		class RandomDungeonSelection
@@ -2590,6 +3037,7 @@ namespace OnSiteProcurementMod
 			public int ClassIndex = RandomOption;
 			public int Level = RandomLevelOption;
 			public int LevelDistribution = LevelDistributionRandom;
+			public int DungeonStartLocation = DungeonStartEntrance;
 			public int SkillGrowthMode = SkillGrowthDefaultWeights;
 			public int PrimarySkillWeight = 5;
 			public int MajorSkillWeight = 3;
@@ -2626,6 +3074,7 @@ namespace OnSiteProcurementMod
 			Button classButton;
 			Button levelButton;
 			Button levelDistributionButton;
+			Button dungeonStartLocationButton;
 			Button skillGrowthButton;
 			Button regionButton;
 			DaggerfallListPickerWindow picker;
@@ -2643,7 +3092,7 @@ namespace OnSiteProcurementMod
 				base.Setup();
 
 				panel = new Panel();
-				panel.Size = new Vector2(256, 154);
+				panel.Size = new Vector2(256, 168);
 				panel.HorizontalAlignment = HorizontalAlignment.Center;
 				panel.VerticalAlignment = VerticalAlignment.Middle;
 				panel.BackgroundColor = new Color(0, 0, 0, 0.86f);
@@ -2658,13 +3107,14 @@ namespace OnSiteProcurementMod
 				classButton = AddOptionButton(52, ClassButton_OnMouseClick);
 				levelButton = AddOptionButton(66, LevelButton_OnMouseClick);
 				levelDistributionButton = AddOptionButton(80, LevelDistributionButton_OnMouseClick);
-				skillGrowthButton = AddOptionButton(94, SkillGrowthButton_OnMouseClick);
-				regionButton = AddOptionButton(108, RegionButton_OnMouseClick);
+				dungeonStartLocationButton = AddOptionButton(94, DungeonStartLocationButton_OnMouseClick);
+				skillGrowthButton = AddOptionButton(108, SkillGrowthButton_OnMouseClick);
+				regionButton = AddOptionButton(122, RegionButton_OnMouseClick);
 
-				Button startButton = DaggerfallUI.AddTextButton(new Rect(51, 136, 70, 14), "Start", panel);
+				Button startButton = DaggerfallUI.AddTextButton(new Rect(51, 150, 70, 14), "Start", panel);
 				startButton.OnMouseClick += StartButton_OnMouseClick;
 
-				Button cancelButton = DaggerfallUI.AddTextButton(new Rect(135, 136, 70, 14), "Cancel", panel);
+				Button cancelButton = DaggerfallUI.AddTextButton(new Rect(135, 150, 70, 14), "Cancel", panel);
 				cancelButton.OnMouseClick += CancelButton_OnMouseClick;
 
 				UpdateLabels();
@@ -2685,6 +3135,7 @@ namespace OnSiteProcurementMod
 				classButton.Label.Text = "Class: " + GetClassName(selection.ClassIndex);
 				levelButton.Label.Text = "Level: " + GetLevelName(selection.Level);
 				levelDistributionButton.Label.Text = "Level-Up Distribution: " + GetLevelDistributionName(selection.LevelDistribution);
+				dungeonStartLocationButton.Label.Text = "Dungeon Start Location: " + GetDungeonStartLocationName(selection.DungeonStartLocation);
 				skillGrowthButton.Label.Text = "Skill Growth: " + GetSkillGrowthName(selection.SkillGrowthMode);
 				regionButton.Label.Text = "Region: " + GetRegionName(selection.RegionIndex);
 			}
@@ -2716,6 +3167,7 @@ namespace OnSiteProcurementMod
 				for (int i = 0; i < PlayableClassCareers.Length; i++)
 					picker.ListBox.AddItem(PlayableClassCareers[i].ToString());
 				picker.ListBox.AddItem("Custom");
+				picker.ListBox.AddItem("Pure Chaos");
 				picker.OnItemPicked += ClassPicker_OnItemPicked;
 				uiManager.PushWindow(picker);
 			}
@@ -2736,6 +3188,16 @@ namespace OnSiteProcurementMod
 				picker.ListBox.AddItem("Random");
 				picker.ListBox.AddItem("Player Chosen");
 				picker.OnItemPicked += LevelDistributionPicker_OnItemPicked;
+				uiManager.PushWindow(picker);
+			}
+
+			void DungeonStartLocationButton_OnMouseClick(BaseScreenComponent sender, Vector2 position)
+			{
+				picker = new DaggerfallListPickerWindow(uiManager, this);
+				picker.ListBox.AddItem("Entrance");
+				picker.ListBox.AddItem("Random Quest Marker");
+				picker.ListBox.AddItem("Purely Random Location");
+				picker.OnItemPicked += DungeonStartLocationPicker_OnItemPicked;
 				uiManager.PushWindow(picker);
 			}
 
@@ -2786,6 +3248,11 @@ namespace OnSiteProcurementMod
 					ClosePicker();
 					OpenCustomClassWindow();
 					return;
+				}
+				else if (index == PlayableClassCareers.Length + 2)
+				{
+					selection.ClassIndex = PureChaosClassOption;
+					selection.CustomCareer = null;
 				}
 				else
 				{
@@ -2844,6 +3311,13 @@ namespace OnSiteProcurementMod
 			void LevelDistributionPicker_OnItemPicked(int index, string itemString)
 			{
 				selection.LevelDistribution = index == 1 ? LevelDistributionPlayerChosen : LevelDistributionRandom;
+				ClosePicker();
+				UpdateLabels();
+			}
+
+			void DungeonStartLocationPicker_OnItemPicked(int index, string itemString)
+			{
+				selection.DungeonStartLocation = Mathf.Clamp(index, DungeonStartEntrance, DungeonStartPureRandom);
 				ClosePicker();
 				UpdateLabels();
 			}
@@ -2959,6 +3433,8 @@ namespace OnSiteProcurementMod
 						return "Custom: " + selection.CustomCareer.Name;
 					return "Custom";
 				}
+				if (classIndex == PureChaosClassOption)
+					return "Pure Chaos";
 				return PlayableClassCareers[Mathf.Clamp(classIndex, 0, PlayableClassCareers.Length - 1)].ToString();
 			}
 
@@ -2972,6 +3448,15 @@ namespace OnSiteProcurementMod
 			string GetLevelDistributionName(int levelDistribution)
 			{
 				return levelDistribution == LevelDistributionPlayerChosen ? "Player Chosen" : "Random";
+			}
+
+			string GetDungeonStartLocationName(int dungeonStartLocation)
+			{
+				if (dungeonStartLocation == DungeonStartQuestMarker)
+					return "Random Quest Marker";
+				if (dungeonStartLocation == DungeonStartPureRandom)
+					return "Purely Random Location";
+				return "Entrance";
 			}
 
 			string GetSkillGrowthName(int skillGrowthMode)
