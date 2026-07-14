@@ -61,6 +61,13 @@
 					"Description": "Print dungeon weapon logic to Player.log",
 					"$version": "v1",
 					"$type": "DaggerfallWorkshop.Game.Utility.ModSupport.ModSettings.ToggleKey"
+				},
+				{
+					"Value": true,
+					"Name": "EnemyDefeatNotifications",
+					"Description": "Show Enemies Defeated progress after each enemy kill",
+					"$version": "v1",
+					"$type": "DaggerfallWorkshop.Game.Utility.ModSupport.ModSettings.ToggleKey"
 				}
 			]
 		}
