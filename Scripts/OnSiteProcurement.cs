@@ -39,7 +39,12 @@ namespace OnSiteProcurementMod
 		const int RandomOption = -1;
 		const int CustomClassOption = -2;
 		const int PureChaosClassOption = -3;
-		const int RandomLevelOption = 0;
+		const int RandomLevel1To20Option = 0;
+		const int RandomLevel21To40Option = -10;
+		const int RandomLevel41To60Option = -11;
+		const int RandomLevel61To80Option = -12;
+		const int RandomLevel81To100Option = -13;
+		const int RandomLevel1To100Option = -14;
 		const int LevelDistributionRandom = 0;
 		const int LevelDistributionPlayerChosen = 1;
 		const int SkillGrowthDefaultWeights = 0;
@@ -78,6 +83,14 @@ namespace OnSiteProcurementMod
 			"Wood Elf",
 			"Khajiit",
 			"Argonian"
+		};
+		static readonly int[] RandomLevelChoices = {
+			RandomLevel1To20Option,
+			RandomLevel21To40Option,
+			RandomLevel41To60Option,
+			RandomLevel61To80Option,
+			RandomLevel81To100Option,
+			RandomLevel1To100Option
 		};
 		static readonly ClassCareers[] PlayableClassCareers = {
 			ClassCareers.Mage,
@@ -836,7 +849,7 @@ namespace OnSiteProcurementMod
 			document.raceTemplate = CharacterDocument.GetRaceTemplate(race);
 			document.gender = gender;
 			document.career = career;
-			document.name = "Random OSP";
+			document.name = GenerateQuickstartName(race, gender, random);
 			document.faceIndex = random.Next(0, 10);
 			document.reflexes = PlayerReflexes.Average;
 			document.classIndex = classIndex;
@@ -891,13 +904,69 @@ namespace OnSiteProcurementMod
 			return selection.GenderIndex == 0 ? Genders.Male : Genders.Female;
 		}
 
+		string GenerateQuickstartName(Races race, Genders gender, System.Random random)
+		{
+			DFRandom.SaveSeed();
+			try
+			{
+				DFRandom.srand(random.Next());
+				string name = DaggerfallUnity.Instance.NameHelper.FullName(MacroHelper.GetNameBank(race), gender);
+				return string.IsNullOrEmpty(name) ? "Random OSP" : name;
+			}
+			finally
+			{
+				DFRandom.RestoreSeed();
+			}
+		}
+
 		int ResolveLevel(RandomDungeonSelection selection, System.Random random)
 		{
 			int maxLevel = GetMaxRandomDungeonLevel();
-			if (selection.Level == RandomLevelOption)
-				return random.Next(1, maxLevel + 1);
+			int minRandomLevel;
+			int maxRandomLevel;
+			if (TryGetRandomLevelRange(selection.Level, out minRandomLevel, out maxRandomLevel))
+			{
+				minRandomLevel = Mathf.Clamp(minRandomLevel, 1, maxLevel);
+				maxRandomLevel = Mathf.Clamp(maxRandomLevel, minRandomLevel, maxLevel);
+				return random.Next(minRandomLevel, maxRandomLevel + 1);
+			}
 
 			return Mathf.Clamp(selection.Level, 1, maxLevel);
+		}
+
+		bool TryGetRandomLevelRange(int levelOption, out int minLevel, out int maxLevel)
+		{
+			switch (levelOption)
+			{
+				case RandomLevel1To20Option:
+					minLevel = 1;
+					maxLevel = 20;
+					return true;
+				case RandomLevel21To40Option:
+					minLevel = 21;
+					maxLevel = 40;
+					return true;
+				case RandomLevel41To60Option:
+					minLevel = 41;
+					maxLevel = 60;
+					return true;
+				case RandomLevel61To80Option:
+					minLevel = 61;
+					maxLevel = 80;
+					return true;
+				case RandomLevel81To100Option:
+					minLevel = 81;
+					maxLevel = 100;
+					return true;
+				case RandomLevel1To100Option:
+					minLevel = 1;
+					maxLevel = 100;
+					return true;
+				default:
+					minLevel = 0;
+					maxLevel = 0;
+					return false;
+			}
 		}
 
 		int GetMaxRandomDungeonLevel()
@@ -3035,9 +3104,9 @@ namespace OnSiteProcurementMod
 			public int RaceIndex = RandomOption;
 			public int GenderIndex = RandomOption;
 			public int ClassIndex = RandomOption;
-			public int Level = RandomLevelOption;
+			public int Level = RandomLevel1To20Option;
 			public int LevelDistribution = LevelDistributionRandom;
-			public int DungeonStartLocation = DungeonStartEntrance;
+			public int DungeonStartLocation = DungeonStartQuestMarker;
 			public int SkillGrowthMode = SkillGrowthDefaultWeights;
 			public int PrimarySkillWeight = 5;
 			public int MajorSkillWeight = 3;
@@ -3099,7 +3168,7 @@ namespace OnSiteProcurementMod
 				panel.Outline.Enabled = true;
 				NativePanel.Components.Add(panel);
 
-				TextLabel title = DaggerfallUI.AddDefaultShadowedTextLabel(new Vector2(77, 8), panel);
+				TextLabel title = DaggerfallUI.AddDefaultShadowedTextLabel(new Vector2(108, 8), panel);
 				title.Text = "OSP Quickstart";
 
 				raceButton = AddOptionButton(24, RaceButton_OnMouseClick);
@@ -3107,8 +3176,8 @@ namespace OnSiteProcurementMod
 				classButton = AddOptionButton(52, ClassButton_OnMouseClick);
 				levelButton = AddOptionButton(66, LevelButton_OnMouseClick);
 				levelDistributionButton = AddOptionButton(80, LevelDistributionButton_OnMouseClick);
-				dungeonStartLocationButton = AddOptionButton(94, DungeonStartLocationButton_OnMouseClick);
-				skillGrowthButton = AddOptionButton(108, SkillGrowthButton_OnMouseClick);
+				skillGrowthButton = AddOptionButton(94, SkillGrowthButton_OnMouseClick);
+				dungeonStartLocationButton = AddOptionButton(108, DungeonStartLocationButton_OnMouseClick);
 				regionButton = AddOptionButton(122, RegionButton_OnMouseClick);
 
 				Button startButton = DaggerfallUI.AddTextButton(new Rect(51, 150, 70, 14), "Start", panel);
@@ -3175,7 +3244,8 @@ namespace OnSiteProcurementMod
 			void LevelButton_OnMouseClick(BaseScreenComponent sender, Vector2 position)
 			{
 				picker = new DaggerfallListPickerWindow(uiManager, this);
-				picker.ListBox.AddItem("Random");
+				for (int i = 0; i < RandomLevelChoices.Length; i++)
+					picker.ListBox.AddItem(GetLevelName(RandomLevelChoices[i]));
 				for (int i = 1; i <= owner.GetMaxRandomDungeonLevel(); i++)
 					picker.ListBox.AddItem(i.ToString());
 				picker.OnItemPicked += LevelPicker_OnItemPicked;
@@ -3303,7 +3373,7 @@ namespace OnSiteProcurementMod
 
 			void LevelPicker_OnItemPicked(int index, string itemString)
 			{
-				selection.Level = index;
+				selection.Level = index < RandomLevelChoices.Length ? RandomLevelChoices[index] : index - RandomLevelChoices.Length + 1;
 				ClosePicker();
 				UpdateLabels();
 			}
@@ -3440,8 +3510,21 @@ namespace OnSiteProcurementMod
 
 			string GetLevelName(int level)
 			{
-				if (level == RandomLevelOption)
-					return "Random";
+				switch (level)
+				{
+					case RandomLevel1To20Option:
+						return "Random 1-20";
+					case RandomLevel21To40Option:
+						return "Random 21-40";
+					case RandomLevel41To60Option:
+						return "Random 41-60";
+					case RandomLevel61To80Option:
+						return "Random 61-80";
+					case RandomLevel81To100Option:
+						return "Random 81-100";
+					case RandomLevel1To100Option:
+						return "Random 1-100";
+				}
 				return level.ToString();
 			}
 
